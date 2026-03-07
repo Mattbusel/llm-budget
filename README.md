@@ -41,6 +41,12 @@ ledger.commit("gpt-4o", 1200, 0.036)?;
 llm-budget = { git = "https://github.com/Mattbusel/llm-budget" }
 ```
 
+Or one-liner:
+
+```ash
+cargo add --git https://github.com/Mattbusel/llm-budget
+```
+
 ## Test coverage
 
 ```bash
