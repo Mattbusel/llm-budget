@@ -1,21 +1,21 @@
 # llm-budget
 
-Autonomous cost governance primitives — hard budget enforcement across agent fleets.
+Autonomous cost governance primitives -- hard budget enforcement across agent fleets.
 
 Track token spend per model, per agent, and per fleet. Block requests before they exceed budget limits. Emit structured cost events for audit trails.
 
 ## What's inside
 
-- **BudgetLedger** — per-model token accounting with configurable hard and soft limits
-- **FleetGovernor** — aggregate budget across many agents; enforce global spend caps
-- **CostEvent** — structured cost records for logging, alerting, and analytics
-- **Budget policies** — daily, per-request, per-agent, and rolling-window limits
+- **BudgetLedger** -- per-model token accounting with configurable hard and soft limits
+- **FleetGovernor** -- aggregate budget across many agents; enforce global spend caps
+- **CostEvent** -- structured cost records for logging, alerting, and analytics
+- **Budget policies** -- daily, per-request, per-agent, and rolling-window limits
 
 ## Features
 
 - Hard limits that **refuse requests** before they exceed budget (not just alert after)
-- Atomic ledger updates — safe under concurrent agent load
-- Pluggable cost tables — bring your own per-token pricing for any model
+- Atomic ledger updates -- safe under concurrent agent load
+- Pluggable cost tables -- bring your own per-token pricing for any model
 
 ## Quick start
 
@@ -23,8 +23,8 @@ Track token spend per model, per agent, and per fleet. Block requests before the
 use llm_budget::{BudgetLedger, BudgetPolicy};
 
 let ledger = BudgetLedger::new(BudgetPolicy {
-    daily_usd_limit: 10.0,
-    per_request_token_limit: 4096,
+ daily_usd_limit: 10.0,
+ per_request_token_limit: 4096,
 });
 
 // Before sending a request
