@@ -38,13 +38,13 @@ ledger.commit("gpt-4o", 1200, 0.036)?;
 
 ```toml
 [dependencies]
-llm-budget = { git = "https://github.com/Mattbusel/llm-budget" }
+llm-budget = { git = "https://gitlab.com/mattbusel/llm-budget" }
 ```
 
 Or one-liner:
 
 ```ash
-cargo add --git https://github.com/Mattbusel/llm-budget
+cargo add --git https://gitlab.com/mattbusel/llm-budget
 ```
 
 ## Test coverage
@@ -55,4 +55,4 @@ cargo test
 
 ---
 
-> Used inside [tokio-prompt-orchestrator](https://github.com/Mattbusel/tokio-prompt-orchestrator) -- a production Rust orchestration layer for LLM pipelines. See the full [primitive library collection](https://github.com/Mattbusel/rust-crates).
+> Used inside [tokio-prompt-orchestrator](https://gitlab.com/mattbusel/tokio-prompt-orchestrator) -- a production Rust orchestration layer for LLM pipelines. See the full [primitive library collection](https://gitlab.com/mattbusel/rust-crates).
