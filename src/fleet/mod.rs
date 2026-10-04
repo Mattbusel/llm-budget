@@ -40,6 +40,9 @@ impl FleetBudget {
     pub fn allocate(&self, agent_id: &str, amount_usd: f64) -> Result<f64, BudgetError> {
         let amount_nanos = usd_to_nanos(amount_usd);
         let limit = self.fleet_limit_nanos;
+        // `fetch_update` is deprecated in favour of `try_update` on Rust 1.99+,
+        // which is newer than this crate's minimum, so keep it for now.
+        #[allow(deprecated)]
         match self.allocated_nanos.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |prev| {
             prev.checked_add(amount_nanos).filter(|&n| n <= limit)
         }) {
@@ -55,6 +58,7 @@ impl FleetBudget {
     /// Give `amount_usd` of allocation back to the fleet.
     fn release(&self, amount_usd: f64) {
         let amount = usd_to_nanos(amount_usd);
+        #[allow(deprecated)] // see `allocate`: try_update needs Rust 1.99
         let _ = self
             .allocated_nanos
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |prev| Some(prev.saturating_sub(amount)));
