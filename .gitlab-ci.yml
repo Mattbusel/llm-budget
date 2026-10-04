@@ -1,0 +1,39 @@
+# Library CI on every push and merge request. Nothing is released from here:
+# crates.io publishing is done by hand.
+
+image: rust:1
+
+variables:
+  CARGO_HOME: "${CI_PROJECT_DIR}/.cargo-home"
+  CARGO_TERM_COLOR: always
+
+cache:
+  key: cargo-${CI_JOB_NAME}
+  paths: [.cargo-home/registry, target/]
+
+stages: [test]
+
+test:
+  stage: test
+  script:
+    - rustup component add clippy
+    - cargo build --all-features
+    - cargo test --all-features
+    - cargo test --no-default-features
+    - cargo clippy --all-targets --all-features -- -D warnings
+    - RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
+    - cargo run --example quickstart
+    - cargo run --example persist_restore
+    - cargo run --example provider_usage
+    - cargo run --example tokens --features tokens
+    - cargo run --example rate_limit --features ratelimit,tracing
+
+# The oldest Rust this crate promises to build on (rust-version in Cargo.toml).
+msrv:
+  stage: test
+  image: rust:1.85
+  variables:
+    # pick dependency versions that support this Rust
+    CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: fallback
+  script:
+    - cargo build --all-features

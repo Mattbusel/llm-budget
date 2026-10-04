@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use llm_budget::budget::AtomicBudget;
 use llm_budget::fleet::FleetBudget;
@@ -35,7 +37,7 @@ fn bench_model_cascade_evaluate(c: &mut Criterion) {
     let mut cascade = ModelCascade::new(ModelTier::Premium, 0.2, 100.0).unwrap();
     c.bench_function("model_cascade_evaluate", |b| {
         b.iter(|| {
-            // evaluate with plenty of budget remaining — no-op fast path
+            // evaluate with plenty of budget remaining, no-op fast path
             black_box(cascade.evaluate(80.0))
         })
     });

@@ -1,45 +1,104 @@
 //! Typed error hierarchy for llm-budget. Every budget operation surfaces
-//! a named, matchable error variant — no silent failures.
+//! a named, matchable error variant, so nothing fails silently.
 
 use crate::model::ModelTier;
 
+/// Every error this crate returns.
 #[derive(Debug, thiserror::Error, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum BudgetError {
     /// The agent has exhausted its per-agent spend limit.
     #[error("Agent '{agent_id}' budget exhausted: spent ${spent:.6}, limit ${limit:.6}")]
-    AgentExhausted { agent_id: String, spent: f64, limit: f64 },
+    AgentExhausted {
+        /// Agent name.
+        agent_id: String,
+        /// Spent so far, in USD.
+        spent: f64,
+        /// The cap, in USD.
+        limit: f64,
+    },
 
     /// A task-scoped budget envelope has been depleted.
     #[error("Task '{task_id}' budget exhausted: spent ${spent:.6}, limit ${limit:.6}")]
-    TaskExhausted { task_id: String, spent: f64, limit: f64 },
+    TaskExhausted {
+        /// Task name.
+        task_id: String,
+        /// Spent so far, in USD.
+        spent: f64,
+        /// The cap, in USD.
+        limit: f64,
+    },
 
     /// A session-scoped budget envelope has been depleted.
     #[error("Session '{session_id}' budget exhausted: spent ${spent:.6}, limit ${limit:.6}")]
-    SessionExhausted { session_id: String, spent: f64, limit: f64 },
+    SessionExhausted {
+        /// Session name.
+        session_id: String,
+        /// Spent so far, in USD.
+        spent: f64,
+        /// The cap, in USD.
+        limit: f64,
+    },
 
     /// The fleet-wide budget cap has been reached.
     #[error("Fleet budget exhausted: spent ${spent:.6}, limit ${limit:.6}")]
-    FleetExhausted { spent: f64, limit: f64 },
+    FleetExhausted {
+        /// Spent so far, in USD.
+        spent: f64,
+        /// The cap, in USD.
+        limit: f64,
+    },
 
     /// The kill switch was triggered; execution must halt.
     #[error("Kill switch activated for agent '{agent_id}': {reason}")]
-    KillSwitchActivated { agent_id: String, reason: String },
+    KillSwitchActivated {
+        /// Agent name.
+        agent_id: String,
+        /// Why the switch was flipped.
+        reason: String,
+    },
 
     /// A model downgrade was required due to budget pressure.
     #[error("Model downgraded from {from:?} to {to:?} due to budget pressure (remaining: ${remaining:.6})")]
-    ModelDowngraded { from: ModelTier, to: ModelTier, remaining: f64 },
+    ModelDowngraded {
+        /// Tier or agent moved from.
+        from: ModelTier,
+        /// Tier or agent moved to.
+        to: ModelTier,
+        /// Budget left, in USD.
+        remaining: f64,
+    },
 
     /// No lower-cost model is available for downgrade.
     #[error("No fallback model available from {from:?}; all tiers exhausted")]
-    NoFallbackAvailable { from: ModelTier },
+    NoFallbackAvailable {
+        /// Tier or agent moved from.
+        from: ModelTier,
+    },
 
-    /// Budget allocation failed — requested amount exceeds available fleet budget.
+    /// Budget allocation failed: requested amount exceeds available fleet budget.
     #[error("Cannot allocate ${requested:.6} to agent '{agent_id}': only ${available:.6} available in fleet")]
-    AllocationFailed { agent_id: String, requested: f64, available: f64 },
+    AllocationFailed {
+        /// Agent name.
+        agent_id: String,
+        /// Amount asked for, in USD.
+        requested: f64,
+        /// Amount actually available, in USD.
+        available: f64,
+    },
 
     /// Reallocation failed because the source agent has insufficient budget.
     #[error("Cannot reallocate ${amount:.6} from '{from}' to '{to}': source has ${available:.6}")]
-    ReallocationFailed { from: String, to: String, amount: f64, available: f64 },
+    ReallocationFailed {
+        /// Tier or agent moved from.
+        from: String,
+        /// Tier or agent moved to.
+        to: String,
+        /// Amount to move, in USD.
+        amount: f64,
+        /// Amount actually available, in USD.
+        available: f64,
+    },
 
     /// Agent ID not found in the fleet registry.
     #[error("Agent '{0}' not registered in fleet")]
@@ -52,6 +111,22 @@ pub enum BudgetError {
     /// Invalid configuration (e.g. negative limit).
     #[error("Invalid budget configuration: {0}")]
     InvalidConfig(String),
+
+    /// The model is not in the price table, so its cost cannot be computed.
+    #[error("No price known for model '{0}'")]
+    UnknownModel(String),
+
+    /// A tokens-per-minute or requests-per-minute limit would be crossed
+    /// (feature `ratelimit`).
+    #[error("Per-minute rate limit reached: retry in {retry_after_ms} ms")]
+    RateLimited {
+        /// How long to wait before the call can pass, in milliseconds.
+        retry_after_ms: u64,
+    },
+
+    /// The tokenizer could not be loaded or used (feature `tokens`).
+    #[error("Tokenizer error: {0}")]
+    Tokenizer(String),
 }
 
 #[cfg(test)]

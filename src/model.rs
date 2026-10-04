@@ -1,10 +1,14 @@
 //! Model tier definitions and automatic downgrade cascade.
 //!
 //! When budget pressure is detected, the cascade selects the next cheaper tier
-//! automatically. The cascade is: Premium → Standard → Economy → Local.
+//! automatically. The cascade is: Premium, then Standard, then Economy, then Local.
+//!
+//! Tier prices are rough averages for when you do not know the exact model.
+//! For real per-model prices use [`crate::pricing::PriceTable`].
 
 /// Cost tier of an LLM model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub enum ModelTier {
     /// Highest capability, highest cost (e.g. GPT-4o, Claude Opus).
     Premium = 3,
@@ -59,7 +63,7 @@ impl ModelTier {
 pub struct ModelCascade {
     /// Current tier.
     current: ModelTier,
-    /// Downgrade when remaining budget falls below this fraction (0.0–1.0).
+    /// Downgrade when remaining budget falls below this fraction (0.0 to 1.0).
     pressure_threshold: f64,
     /// Total budget used for percentage calculation.
     total_budget: f64,
@@ -86,15 +90,20 @@ impl ModelCascade {
         self.current
     }
 
+    /// Update the budget the threshold is measured against (after a reallocation).
+    pub(crate) fn set_total_budget(&mut self, total: f64) {
+        if total > 0.0 {
+            self.total_budget = total;
+        }
+    }
+
     /// Evaluate remaining budget and downgrade if under pressure.
     /// Returns Some(new_tier) if a downgrade occurred, None otherwise.
     pub fn evaluate(&mut self, remaining: f64) -> Option<ModelTier> {
         let fraction_remaining = remaining / self.total_budget;
         if fraction_remaining <= self.pressure_threshold {
             if let Some(next) = self.current.downgrade() {
-                let old = self.current;
                 self.current = next;
-                let _ = old; // consumed
                 return Some(self.current);
             }
         }

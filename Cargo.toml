@@ -1,8 +1,16 @@
 [package]
 name = "llm-budget"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "Autonomous cost governance primitives — hard budget enforcement across agent fleets"
+rust-version = "1.85"
+description = "Hard USD spend limits for LLM agents: per-agent and fleet caps, real per-model prices, kill switch, automatic model downgrade"
+license = "MIT"
+readme = "README.md"
+repository = "https://gitlab.com/mattbusel/llm-budget"
+documentation = "https://docs.rs/llm-budget"
+keywords = ["llm", "budget", "cost", "agents", "openai"]
+categories = ["finance", "concurrency", "asynchronous"]
+include = ["src/**/*.rs", "benches/**/*.rs", "examples/**/*.rs", "scripts/update_prices.py", "Cargo.toml", "README.md", "CHANGELOG.md", "LICENSE"]
 
 [lints.clippy]
 unwrap_used = "deny"
@@ -10,33 +18,78 @@ expect_used = "deny"
 panic = "deny"
 todo = "deny"
 
+[features]
+default = []
+## Count tokens from text with OpenAI's tokenizers (tiktoken-rs).
+tokens = ["dep:tiktoken-rs"]
+## Tokens-per-minute and requests-per-minute limits (governor).
+ratelimit = ["dep:governor"]
+## Log charges, refusals, downgrades and kills as tracing events.
+tracing = ["dep:tracing"]
+## Export spend and refusal counters through the metrics facade (Prometheus, StatsD, ...).
+metrics = ["dep:metrics"]
+## JSON Schema for the serialized types (schemars).
+schemars = ["dep:schemars"]
+## `From<&CompletionUsage>` for async-openai users (types only, no HTTP client).
+async-openai = ["dep:async-openai"]
+
 [dependencies]
-# tokio: async runtime + atomics
-tokio = { version = "1.40", features = ["full"] }
-# serde: budget persistence serialization
+# sync primitives for the cascade and audit log, async file I/O for BudgetStore
+tokio = { version = "1.40", features = ["sync", "fs"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-# thiserror: typed error hierarchy
 thiserror = "1.0"
-# async-trait: trait objects for budget backends
-async-trait = "0.1"
-# rust_decimal: exact monetary arithmetic — never use f64 for money
-rust_decimal = { version = "1.35", features = ["serde-with-str"] }
-# dashmap: lock-free concurrent fleet state
+# lock-free agent registry
 dashmap = "5.5"
-# uuid: agent/task/session identifiers
-uuid = { version = "1.6", features = ["v4", "fast-rng", "serde"] }
-# chrono: spend window timestamps
-chrono = { version = "0.4", features = ["serde"] }
-# tracing: observability for spend events
-tracing = "0.1"
+# exact token counts (feature "tokens")
+tiktoken-rs = { version = "0.12.1", optional = true }
+# rate limits (feature "ratelimit")
+governor = { version = "0.10", default-features = false, features = ["std"], optional = true }
+# observability (features "tracing" and "metrics")
+tracing = { version = "0.1", default-features = false, features = ["std"], optional = true }
+metrics = { version = "0.24", default-features = false, optional = true }
+# JSON Schema (feature "schemars")
+schemars = { version = "1", optional = true }
+# async-openai interop (feature "async-openai"), types only
+async-openai = { version = "0.42", default-features = false, features = ["chat-completion-types"], optional = true }
 
 [dev-dependencies]
-tokio-test = "0.4"
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread"] }
 tempfile = "3.9"
 criterion = { version = "0.5", features = ["async_tokio"] }
-tracing-subscriber = "0.3"
+proptest = "1"
+metrics-util = "0.20"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
+# for benches/vs_alternatives.rs: the previous release and a rate limiter
+llm_budget_011 = { package = "llm-budget", version = "=0.1.1" }
+governor = { version = "0.10", default-features = false, features = ["std"] }
 
 [[bench]]
 name = "budget_hot_path"
 harness = false
+
+[[bench]]
+name = "vs_alternatives"
+harness = false
+
+[[example]]
+name = "quickstart"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[[example]]
+name = "tokens"
+required-features = ["tokens"]
+
+[[example]]
+name = "persist_restore"
+
+[[example]]
+name = "provider_usage"
+
+[[example]]
+name = "rate_limit"
+required-features = ["ratelimit", "tracing"]

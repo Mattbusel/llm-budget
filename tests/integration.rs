@@ -117,7 +117,7 @@ async fn test_persistence_save_then_reload_from_disk() {
         let snaps = vec![agent.snapshot().await];
         store.save("session-1", snaps).await.unwrap();
     }
-    // New store instance — no cache, must read from disk
+    // New store instance, no cache, must read from disk
     {
         let store = BudgetStore::new(dir.path());
         let loaded = store.load("session-1").await.unwrap();

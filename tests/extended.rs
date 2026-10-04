@@ -1,9 +1,9 @@
-//! Extended test coverage — error variants, model cascade edge cases,
+//! Extended test coverage: error variants, model cascade edge cases,
 //! atomic budget concurrency, fleet exhaustion, persistence edge cases.
 
 use llm_budget::budget::{AgentBudget, AtomicBudget, BudgetEnvelope, BudgetSnapshot, ScopeKind};
 use llm_budget::error::BudgetError;
-use llm_budget::fleet::{FleetAllocator, FleetBudget};
+use llm_budget::fleet::FleetBudget;
 use llm_budget::model::{ModelCascade, ModelTier};
 use llm_budget::persistence::BudgetStore;
 use std::sync::Arc;
@@ -157,7 +157,7 @@ fn test_cascade_invalid_budget_zero_rejected() {
 #[test]
 fn test_cascade_evaluate_no_downgrade_when_budget_ample() {
     let mut c = ModelCascade::new(ModelTier::Premium, 0.2, 100.0).unwrap();
-    let result = c.evaluate(80.0); // 80% remaining — no pressure
+    let result = c.evaluate(80.0); // 80% remaining, no pressure
     assert!(result.is_none());
     assert_eq!(c.current(), ModelTier::Premium);
 }
@@ -165,7 +165,7 @@ fn test_cascade_evaluate_no_downgrade_when_budget_ample() {
 #[test]
 fn test_cascade_evaluate_downgrades_when_under_threshold() {
     let mut c = ModelCascade::new(ModelTier::Premium, 0.2, 100.0).unwrap();
-    let result = c.evaluate(15.0); // 15% remaining — under 20% threshold
+    let result = c.evaluate(15.0); // 15% remaining, under 20% threshold
     assert_eq!(result, Some(ModelTier::Standard));
     assert_eq!(c.current(), ModelTier::Standard);
 }
@@ -278,6 +278,7 @@ async fn test_budget_envelope_audit_log_grows() {
         task_id: None,
         session_id: None,
         model_tier: ModelTier::Standard,
+        model: None,
         input_tokens: 100,
         output_tokens: 50,
         cost_usd: 0.001,
@@ -325,7 +326,7 @@ async fn test_persistence_overwrite_reads_latest_from_disk() {
     };
     let store = BudgetStore::new(dir.path());
     store.save("s1", vec![make_snap(1.0)]).await.unwrap();
-    // New store instance — no shared cache, forces disk read
+    // New store instance (no shared cache), forces disk read
     let store2 = BudgetStore::new(dir.path());
     store2.save("s1", vec![make_snap(5.0)]).await.unwrap();
     let store3 = BudgetStore::new(dir.path());

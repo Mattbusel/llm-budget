@@ -1,4 +1,4 @@
-//! Budget persistence — save/restore budget state across sessions.
+//! Budget persistence: save and restore budget state across runs, as JSON files.
 
 use crate::budget::BudgetSnapshot;
 use crate::error::BudgetError;
@@ -9,19 +9,24 @@ use std::sync::Arc;
 
 /// Serializable budget state for a session.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct PersistedBudgetState {
+    /// Session name the state was saved under.
     pub session_id: String,
+    /// One snapshot per agent.
     pub snapshots: Vec<BudgetSnapshot>,
+    /// Unix time in milliseconds of the save.
     pub saved_at_ms: u64,
 }
 
-/// Budget store — reads and writes persisted budget state.
+/// Reads and writes `<session>.budget.json` files in one directory.
 pub struct BudgetStore {
     base_path: PathBuf,
     cache: Arc<RwLock<HashMap<String, PersistedBudgetState>>>,
 }
 
 impl BudgetStore {
+    /// Store files under `base_path` (created on first save).
     pub fn new(base_path: impl Into<PathBuf>) -> Self {
         Self {
             base_path: base_path.into(),
@@ -30,41 +35,53 @@ impl BudgetStore {
     }
 
     /// Save budget snapshots for a session.
+    ///
+    /// Session ids may contain letters, digits, `-`, `_` and `.` only, so an id
+    /// can never point outside the store directory.
+    ///
+    /// # Errors
+    /// [`BudgetError::PersistenceError`] for an invalid id or an I/O failure.
     pub async fn save(
         &self,
         session_id: &str,
         snapshots: Vec<BudgetSnapshot>,
     ) -> Result<(), BudgetError> {
+        let path = self.session_path(session_id)?;
         let state = PersistedBudgetState {
             session_id: session_id.to_string(),
-            snapshots: snapshots.clone(),
+            snapshots,
             saved_at_ms: now_ms(),
         };
 
-        // Write to cache
-        self.cache.write().await.insert(session_id.to_string(), state.clone());
-
-        // Write to disk
-        let path = self.session_path(session_id);
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await
                 .map_err(|e| BudgetError::PersistenceError(e.to_string()))?;
         }
         let json = serde_json::to_string_pretty(&state)
             .map_err(|e| BudgetError::PersistenceError(e.to_string()))?;
-        tokio::fs::write(&path, json).await
+        // Write to a temporary file and rename it, so a crash mid-write never
+        // leaves a truncated JSON file behind.
+        let tmp = path.with_extension("json.tmp");
+        tokio::fs::write(&tmp, json).await
+            .map_err(|e| BudgetError::PersistenceError(e.to_string()))?;
+        tokio::fs::rename(&tmp, &path).await
             .map_err(|e| BudgetError::PersistenceError(e.to_string()))?;
 
+        self.cache.write().await.insert(session_id.to_string(), state);
         Ok(())
     }
 
-    /// Load budget state for a session, checking cache first.
+    /// Load budget state for a session, checking the in-memory cache first.
+    ///
+    /// # Errors
+    /// [`BudgetError::PersistenceError`] if the id is invalid, the file is
+    /// missing or it does not parse.
     pub async fn load(&self, session_id: &str) -> Result<PersistedBudgetState, BudgetError> {
+        let path = self.session_path(session_id)?;
         if let Some(state) = self.cache.read().await.get(session_id) {
             return Ok(state.clone());
         }
 
-        let path = self.session_path(session_id);
         let data = tokio::fs::read_to_string(&path).await
             .map_err(|_| BudgetError::PersistenceError(
                 format!("session '{}' not found on disk", session_id)
@@ -76,18 +93,24 @@ impl BudgetStore {
         Ok(state)
     }
 
-    /// Delete persisted state for a session.
+    /// Delete persisted state for a session. Deleting a missing session is not an error.
+    ///
+    /// # Errors
+    /// [`BudgetError::PersistenceError`] for an invalid id or an I/O failure.
     pub async fn delete(&self, session_id: &str) -> Result<(), BudgetError> {
+        let path = self.session_path(session_id)?;
         self.cache.write().await.remove(session_id);
-        let path = self.session_path(session_id);
-        if path.exists() {
-            tokio::fs::remove_file(&path).await
-                .map_err(|e| BudgetError::PersistenceError(e.to_string()))?;
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(BudgetError::PersistenceError(e.to_string())),
         }
-        Ok(())
     }
 
     /// List all session IDs that have persisted state.
+    ///
+    /// # Errors
+    /// [`BudgetError::PersistenceError`] if the directory cannot be read.
     pub async fn list_sessions(&self) -> Result<Vec<String>, BudgetError> {
         let mut sessions = Vec::new();
         let mut dir = tokio::fs::read_dir(&self.base_path).await
@@ -105,8 +128,19 @@ impl BudgetStore {
         Ok(sessions)
     }
 
-    fn session_path(&self, session_id: &str) -> PathBuf {
-        self.base_path.join(format!("{}.budget.json", session_id))
+    fn session_path(&self, session_id: &str) -> Result<PathBuf, BudgetError> {
+        let valid = !session_id.is_empty()
+            && session_id.len() <= 200
+            && !session_id.starts_with('.')
+            && session_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+        if !valid {
+            return Err(BudgetError::PersistenceError(format!(
+                "invalid session id '{session_id}': use letters, digits, '-', '_' or '.'"
+            )));
+        }
+        Ok(self.base_path.join(format!("{session_id}.budget.json")))
     }
 }
 
@@ -212,5 +246,28 @@ mod tests {
         store.cache.write().await.clear();
         let loaded = store.load("s1").await.expect("load after overwrite");
         assert_eq!(loaded.snapshots[0].spent_usd, 5.0);
+    }
+
+    #[tokio::test]
+    async fn test_session_id_cannot_escape_store_dir() {
+        // Before 0.2.0 "../outside" was joined onto the base path as-is and the
+        // file was written one directory up.
+        let dir = TempDir::new().expect("tempdir");
+        let inner = dir.path().join("store");
+        let store = BudgetStore::new(&inner);
+        for bad in ["../outside", "a/b", "a\\b", "", "..", ".hidden"] {
+            assert!(store.save(bad, vec![]).await.is_err(), "accepted {bad:?}");
+            assert!(store.load(bad).await.is_err());
+            assert!(store.delete(bad).await.is_err());
+        }
+        assert!(!dir.path().join("outside.budget.json").exists());
+        store.save("ok-id_1.v2", vec![]).await.expect("valid id");
+    }
+
+    #[tokio::test]
+    async fn test_delete_missing_session_is_ok() {
+        let dir = TempDir::new().expect("tempdir");
+        let store = BudgetStore::new(dir.path());
+        store.delete("never-saved").await.expect("delete missing");
     }
 }
