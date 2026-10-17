@@ -4,7 +4,9 @@ Hard spend limits for LLM agents in Rust: every call is charged against a per-ag
 
 [![crates.io](https://img.shields.io/crates/v/llm-budget.svg)](https://crates.io/crates/llm-budget)
 [![docs.rs](https://img.shields.io/docsrs/llm-budget)](https://docs.rs/llm-budget)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://gitlab.com/mattbusel/llm-budget/-/blob/main/LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/Mattbusel/llm-budget/blob/main/LICENSE)
+[![CI](https://github.com/Mattbusel/llm-budget/actions/workflows/ci.yml/badge.svg)](https://github.com/Mattbusel/llm-budget/actions/workflows/ci.yml)
+![MSRV 1.85](https://img.shields.io/badge/MSRV-1.85-blue.svg)
 
 Give each agent a budget in US dollars, put a fleet-wide total on top, and charge every model call to it. You get a typed error the moment a call would go over, a kill switch, and an automatic step down to a cheaper model tier when an agent is running low. Prices come from a built-in table of 232 real models (OpenAI, Anthropic, Google Gemini, Mistral, DeepSeek, xAI).
 
@@ -187,8 +189,10 @@ Then charge with `AgentBudget::charge_model_with(&table, ...)`.
 - Charges made directly on an `AgentBudget` you got from `get_agent` are not added to the fleet's spend counter; charge through the fleet for that.
 - Gemini models with long-context surcharges are priced at their base rate.
 
-Run the tests with `cargo test --all-features`. Contributions are welcome, see [CONTRIBUTING.md](https://gitlab.com/mattbusel/llm-budget/-/blob/main/CONTRIBUTING.md).
+Run the tests with `cargo test --all-features`. Contributions are welcome, see [CONTRIBUTING.md](https://github.com/Mattbusel/llm-budget/blob/main/CONTRIBUTING.md).
 
 ## License
 
-MIT, see [LICENSE](https://gitlab.com/mattbusel/llm-budget/-/blob/main/LICENSE).
+MIT, see [LICENSE](https://github.com/Mattbusel/llm-budget/blob/main/LICENSE).
+
+Source, issues and stars: [GitHub](https://github.com/Mattbusel/llm-budget). Mirror and release downloads: [GitLab](https://gitlab.com/mattbusel/llm-budget). More open-source Rust from the same author: [tensorust.com/open-source](https://tensorust.com/open-source/).

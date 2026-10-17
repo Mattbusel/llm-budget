@@ -1,15 +1,16 @@
 [package]
 name = "llm-budget"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 rust-version = "1.85"
 description = "Hard USD spend limits for LLM agents: per-agent and fleet caps, real per-model prices, kill switch, automatic model downgrade"
 license = "MIT"
 readme = "README.md"
-repository = "https://gitlab.com/mattbusel/llm-budget"
+repository = "https://github.com/Mattbusel/llm-budget"
+homepage = "https://tensorust.com/open-source/"
 documentation = "https://docs.rs/llm-budget"
 keywords = ["llm", "budget", "cost", "agents", "openai"]
-categories = ["finance", "concurrency", "asynchronous"]
+categories = ["development-tools", "asynchronous", "concurrency"]
 include = ["src/**/*.rs", "benches/**/*.rs", "examples/**/*.rs", "scripts/update_prices.py", "Cargo.toml", "README.md", "CHANGELOG.md", "LICENSE"]
 
 [lints.clippy]

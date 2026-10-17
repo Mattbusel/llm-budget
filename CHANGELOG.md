@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1 (2026-10-17)
+
+- `repository` now points at GitHub (GitLab stays as the mirror); crates.io category `finance` replaced by `development-tools`; added a homepage. README: CI and MSRV badges. No code changes.
+
 ## 0.2.0 (2026-10-03)
 
 ### Added
