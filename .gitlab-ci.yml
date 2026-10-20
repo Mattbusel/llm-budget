@@ -36,4 +36,5 @@ msrv:
     # pick dependency versions that support this Rust
     CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: fallback
   script:
-    - cargo build --all-features
+    # every feature except `rig`, which needs Rust 1.95 (rig-agent's own minimum)
+    - cargo build --features tokens,ratelimit,tracing,metrics,schemars,async-openai

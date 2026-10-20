@@ -17,7 +17,7 @@ cargo add llm-budget
 cargo add tokio --features macros,rt-multi-thread
 ```
 
-Optional features: `tokens` (count tokens from text), `ratelimit` (tokens and requests per minute), `tracing`, `metrics`, `schemars`. See the table below.
+Optional features: `tokens` (count tokens from text), `ratelimit` (tokens and requests per minute), `tracing`, `metrics`, `schemars`, `async-openai`, `rig` (a budget hook for rig agents). See the table below.
 
 ## In ten lines
 
@@ -91,7 +91,22 @@ The same program is in `examples/quickstart.rs`: `cargo run --example quickstart
       agent.charge_usage("gpt-4o", &llm_budget::Usage::from(u), None, None).await?;
   }
   ```
-- **reqwest, genai, rig, or any other client**: pass the raw response body (or the usage object you have serialised) to `Usage::from_json`; it understands the OpenAI, Anthropic and Gemini formats. See `examples/provider_usage.rs`.
+- **rig** (rig-agent 0.44): turn on the `rig` feature and attach `BudgetHook`. Every model turn is charged at the model's real price (cache reads included), the run stops with `Agent 'researcher' budget exhausted: ...` at the turn that would cross the cap, and a run on a spent budget stops before it calls the provider:
+  ```rust,ignore
+  use std::sync::Arc;
+  use llm_budget::{rig::BudgetHook, AgentBudget, ModelTier};
+  use rig_agent::AgentBuilder;
+
+  let budget = Arc::new(AgentBudget::new("researcher", 0.50, ModelTier::Standard, 0.2)?); // $0.50 per agent
+  let agent = AgentBuilder::new(model) // any rig completion model, here OpenAI gpt-4o
+      .preamble("You are a research assistant.")
+      .add_hook(BudgetHook::new(budget.clone(), "gpt-4o"))
+      .build();
+  let answer = agent.prompt("Summarise these 40 papers").max_turns(30).await; // Err once the cap is hit
+  println!("spent ${:.4}", budget.spent_usd());
+  ```
+  Share one `Arc<AgentBudget>` across agents for a common cap. The `rig` feature needs Rust 1.95 (rig's own minimum); the rest of the crate keeps MSRV 1.85.
+- **reqwest, genai, or any other client**: pass the raw response body (or the usage object you have serialised) to `Usage::from_json`; it understands the OpenAI, Anthropic and Gemini formats. See `examples/provider_usage.rs`.
 - **governor**: the `ratelimit` feature uses it for tokens-per-minute limits.
 - **tracing / metrics**: turn on the features of the same name to get events and Prometheus-style counters for every decision.
 - **LiteLLM**: the price table is LiteLLM's; `PriceTable::from_litellm_json` reads the same file a LiteLLM proxy uses.
@@ -106,6 +121,7 @@ The same program is in `examples/quickstart.rs`: `cargo run --example quickstart
 | `tracing` | no | A `tracing` event for every accepted or refused charge, downgrade and kill | [tracing](https://crates.io/crates/tracing) |
 | `metrics` | no | `llm_budget_charges_total`, `llm_budget_spent_usd`, `llm_budget_remaining_usd`, `llm_budget_downgrades_total` through the metrics facade (Prometheus and other exporters) | [metrics](https://crates.io/crates/metrics) |
 | `async-openai` | no | `From<&CompletionUsage> for Usage`, so an async-openai response can be charged directly | [async-openai](https://crates.io/crates/async-openai) types only (no HTTP client) |
+| `rig` | no | `rig::BudgetHook`, an `AgentHook` for rig-agent 0.44 that charges every model turn and stops the run at the cap, and `From<&rig Usage> for Usage`. Needs Rust 1.95 | [rig-agent](https://crates.io/crates/rig-agent) (no default features) |
 | `schemars` | no | JSON Schema for `SpendRecord`, `BudgetSnapshot`, `ChargeReceipt` and the saved state, for non-Rust readers of those files | [schemars](https://crates.io/crates/schemars) |
 
 ## Examples

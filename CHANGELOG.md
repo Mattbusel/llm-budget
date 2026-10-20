@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- Feature `rig`: `rig::BudgetHook`, an `AgentHook` for rig-agent 0.44. It charges each model turn to an `AgentBudget` (the provider's reported cost when rig has one, otherwise the price table with cache discounts), stops the run when a turn would cross the cap, trips the kill switch so other runs sharing the budget stop before their first call (`keep_alive_on_refusal` turns that off), and refuses to start a run on a spent or killed budget. Also `From<&rig_agent::core::completion::Usage> for Usage`. Needs Rust 1.95 (rig's MSRV); the rest of the crate stays on 1.85.
+
 ## 0.2.1 (2026-10-17)
 
 - `repository` now points at GitHub (GitLab stays as the mirror); crates.io category `finance` replaced by `development-tools`; added a homepage. README: CI and MSRV badges. No code changes.

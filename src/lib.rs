@@ -12,6 +12,9 @@ pub mod pricing;
 #[cfg(feature = "ratelimit")]
 #[cfg_attr(docsrs, doc(cfg(feature = "ratelimit")))]
 pub mod ratelimit;
+#[cfg(feature = "rig")]
+#[cfg_attr(docsrs, doc(cfg(feature = "rig")))]
+pub mod rig;
 #[cfg(feature = "tokens")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tokens")))]
 pub mod tokens;
