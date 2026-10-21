@@ -1,5 +1,13 @@
 # llm-budget
 
+<!-- outcome-block -->
+**A runaway agent loop can't run up your bill: every call is charged to a per-agent dollar cap and refused the moment it would go over.**
+
+**Why this over the alternatives:** Provider spend alerts arrive after the money is gone. This refuses the call before it is made, with prices for 232 real models built in.
+
+**Guarantee:** if it doesn't do what this README says, [open an issue](https://github.com/Mattbusel/llm-budget/issues) and I'll fix it.
+<!-- outcome-block -->
+
 Hard spend limits for LLM agents in Rust: every call is charged against a per-agent dollar cap and refused once the cap would be crossed, so a runaway loop stops instead of running up the bill.
 
 [![crates.io](https://img.shields.io/crates/v/llm-budget.svg)](https://crates.io/crates/llm-budget)
