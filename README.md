@@ -1,14 +1,12 @@
 # llm-budget
 
 <!-- outcome-block -->
-**A runaway agent loop can't run up your bill: every call is charged to a per-agent dollar cap and refused the moment it would go over.**
+**Stops a runaway agent before it runs up your bill. Each call is charged to a dollar cap and refused if it would go over.**
 
-**Why this over the alternatives:** Provider spend alerts arrive after the money is gone. This refuses the call before it is made, with prices for 232 real models built in.
+Provider alerts come after the money is gone. This refuses the call first. Prices for 232 real models built in.
 
-**Guarantee:** if it doesn't do what this README says, [open an issue](https://github.com/Mattbusel/llm-budget/issues) and I'll fix it.
+If it doesn't do what this README says, [open an issue](https://github.com/Mattbusel/llm-budget/issues) and I'll fix it.
 <!-- outcome-block -->
-
-Hard spend limits for LLM agents in Rust: every call is charged against a per-agent dollar cap and refused once the cap would be crossed, so a runaway loop stops instead of running up the bill.
 
 [![crates.io](https://img.shields.io/crates/v/llm-budget.svg)](https://crates.io/crates/llm-budget)
 [![docs.rs](https://img.shields.io/docsrs/llm-budget)](https://docs.rs/llm-budget)
@@ -16,7 +14,7 @@ Hard spend limits for LLM agents in Rust: every call is charged against a per-ag
 [![CI](https://github.com/Mattbusel/llm-budget/actions/workflows/ci.yml/badge.svg)](https://github.com/Mattbusel/llm-budget/actions/workflows/ci.yml)
 ![MSRV 1.85](https://img.shields.io/badge/MSRV-1.85-blue.svg)
 
-Give each agent a budget in US dollars, put a fleet-wide total on top, and charge every model call to it. You get a typed error the moment a call would go over, a kill switch, and an automatic step down to a cheaper model tier when an agent is running low. Prices come from a built-in table of 232 real models (OpenAI, Anthropic, Google Gemini, Mistral, DeepSeek, xAI).
+Give each agent a dollar budget. Put a fleet total on top. Charge every model call to it. You get a typed error when a call would go over, a kill switch, and a step down to a cheaper model when an agent runs low. Prices for 232 models (OpenAI, Anthropic, Google Gemini, Mistral, DeepSeek, xAI).
 
 ## Install
 
@@ -25,7 +23,7 @@ cargo add llm-budget
 cargo add tokio --features macros,rt-multi-thread
 ```
 
-Optional features: `tokens` (count tokens from text), `ratelimit` (tokens and requests per minute), `tracing`, `metrics`, `schemars`, `async-openai`, `rig` (a budget hook for rig agents). See the table below.
+Optional features: `tokens`, `ratelimit`, `tracing`, `metrics`, `schemars`, `async-openai`, `rig`. Table below.
 
 ## In ten lines
 
@@ -80,26 +78,26 @@ async fn main() -> Result<(), BudgetError> {
 }
 ```
 
-The same program is in `examples/quickstart.rs`: `cargo run --example quickstart`.
+Also in `examples/quickstart.rs`: `cargo run --example quickstart`.
 
-## Why this and not something else
+## Why this
 
-- **Provider SDKs and gateways** (async-openai, genai, rig, litellm-rs) report usage after the fact or enforce budgets in a separate server process. `llm-budget` is a small library you call before each request, inside your own process, with no server and no network.
-- **Rate limiters** such as [governor](https://crates.io/crates/governor) cap how *fast* you spend, not how *much*. Use both: the `ratelimit` feature wraps governor for tokens-per-minute limits, next to the dollar caps.
-- **A `Mutex<f64>` you write yourself** works until two tasks race or a float rounds a tiny charge to zero. Here spend is an atomic nano-dollar counter: the cap cannot be crossed under concurrency, and a 1-token call to a cheap model still counts.
+- **SDKs and gateways** (async-openai, genai, rig, litellm-rs) report usage after the fact, or need a separate server. This is a library you call before each request. No server, no network.
+- **Rate limiters** like [governor](https://crates.io/crates/governor) cap how *fast* you spend, not how *much*. The `ratelimit` feature wraps governor, so you can use both.
+- **Your own `Mutex<f64>`** works until two tasks race or a float rounds a tiny charge to zero. Here spend is an atomic nano-dollar counter. The cap holds under concurrency, and a 1-token call still counts.
 
 ## Already using another crate?
 
-`llm-budget` does not make HTTP calls, so it sits next to whatever client you have:
+It makes no HTTP calls, so it works next to any client:
 
-- **async-openai**: turn on the `async-openai` feature and charge the response's usage directly:
+- **async-openai**: turn on `async-openai` and charge the response's usage:
   ```rust,ignore
   let resp = client.chat().create(request).await?;
   if let Some(u) = &resp.usage {
       agent.charge_usage("gpt-4o", &llm_budget::Usage::from(u), None, None).await?;
   }
   ```
-- **rig** (rig-agent 0.44): turn on the `rig` feature and attach `BudgetHook`. Every model turn is charged at the model's real price (cache reads included), the run stops with `Agent 'researcher' budget exhausted: ...` at the turn that would cross the cap, and a run on a spent budget stops before it calls the provider:
+- **rig** (rig-agent 0.44): turn on `rig` and attach `BudgetHook`. Each model turn is charged at the real price (cache reads included). The run stops with `Agent 'researcher' budget exhausted: ...` at the turn that would cross the cap. A spent budget stops before calling the provider:
   ```rust,ignore
   use std::sync::Arc;
   use llm_budget::{rig::BudgetHook, AgentBudget, ModelTier};
@@ -113,11 +111,11 @@ The same program is in `examples/quickstart.rs`: `cargo run --example quickstart
   let answer = agent.prompt("Summarise these 40 papers").max_turns(30).await; // Err once the cap is hit
   println!("spent ${:.4}", budget.spent_usd());
   ```
-  Share one `Arc<AgentBudget>` across agents for a common cap. The `rig` feature needs Rust 1.95 (rig's own minimum); the rest of the crate keeps MSRV 1.85.
-- **reqwest, genai, or any other client**: pass the raw response body (or the usage object you have serialised) to `Usage::from_json`; it understands the OpenAI, Anthropic and Gemini formats. See `examples/provider_usage.rs`.
-- **governor**: the `ratelimit` feature uses it for tokens-per-minute limits.
-- **tracing / metrics**: turn on the features of the same name to get events and Prometheus-style counters for every decision.
-- **LiteLLM**: the price table is LiteLLM's; `PriceTable::from_litellm_json` reads the same file a LiteLLM proxy uses.
+  Share one `Arc<AgentBudget>` for a common cap. `rig` needs Rust 1.95. The rest keeps MSRV 1.85.
+- **reqwest, genai, or any client**: pass the raw response body (or usage object) to `Usage::from_json`. It reads OpenAI, Anthropic and Gemini formats. See `examples/provider_usage.rs`.
+- **governor**: `ratelimit` uses it for tokens-per-minute limits.
+- **tracing / metrics**: same-named features give events and Prometheus-style counters for every decision.
+- **LiteLLM**: the price table is LiteLLM's. `PriceTable::from_litellm_json` reads the same file.
 
 ## Features
 
@@ -144,15 +142,15 @@ The same program is in `examples/quickstart.rs`: `cargo run --example quickstart
 
 ## What you get
 
-- **`AgentBudget`**: a per-agent cap. Charge from the provider's own usage report (`charge_usage`, the most accurate), by model name and token counts (`charge_model`), by exact dollar amount (`charge_usd`, for when your provider reports the cost), or by tier estimate (`charge`). A charge that would cross the cap is refused with `BudgetError::AgentExhausted` and nothing is recorded.
-- **`Usage`**: reads the `usage` block of an OpenAI (Chat Completions or Responses), Anthropic or Gemini response, whole body or just the block, and normalises the different ways they count prompt-cache tokens, so cached tokens are charged at the cache price and never twice.
-- **`PriceTable`**: real input, output and prompt-cache prices for 232 chat models, generated from [LiteLLM's maintained price list](https://github.com/BerriAI/litellm) (MIT). `pricing::SNAPSHOT_DATE` says when. Load a newer copy of that JSON file at runtime with `PriceTable::from_litellm_json`, or add your own models with `insert`.
-- **`FleetAllocator`**: registers agents against a fleet total, refuses registrations that would oversubscribe it, tracks real fleet spend, moves unspent budget between agents (`reallocate`) and returns it when an agent is removed (`remove_agent`).
-- **Kill switch**: `kill(reason)` on one agent or `kill_all` on the fleet. The reason is returned in the error.
-- **Downgrade cascade** (`ModelTier`, `ModelCascade`): when the remaining fraction drops to the threshold, the agent steps down one tier and the charge tells you.
-- **Lock-free accounting**: spend is an atomic counter of nano-dollars updated with compare-and-swap, so many tasks can charge at once without a mutex and the cap is never exceeded.
-- **Audit trail**: every accepted charge is kept as a `SpendRecord` (agent, task, session, model, tokens, cost, time).
-- **`BudgetStore`**: saves fleet snapshots as one JSON file per session (written atomically, session ids checked so they cannot point outside the folder).
+- **`AgentBudget`**: a per-agent cap. Charge from the provider's usage report (`charge_usage`, most accurate), model and token counts (`charge_model`), exact dollars (`charge_usd`), or tier estimate (`charge`). Over the cap: `BudgetError::AgentExhausted`, nothing recorded.
+- **`Usage`**: reads the `usage` block from OpenAI (Chat Completions or Responses), Anthropic or Gemini. Cached tokens are charged at the cache price, never twice.
+- **`PriceTable`**: input, output and cache prices for 232 chat models, from [LiteLLM's price list](https://github.com/BerriAI/litellm) (MIT). `pricing::SNAPSHOT_DATE` says when. Load a newer file with `PriceTable::from_litellm_json`, or add models with `insert`.
+- **`FleetAllocator`**: registers agents under a fleet total and refuses oversubscription. Tracks fleet spend. Moves unspent budget (`reallocate`) and returns it on `remove_agent`.
+- **Kill switch**: `kill(reason)` on one agent, `kill_all` on the fleet. The reason comes back in the error.
+- **Downgrade cascade** (`ModelTier`, `ModelCascade`): at the threshold, the agent steps down one tier and the charge tells you.
+- **Lock-free**: spend is an atomic nano-dollar counter with compare-and-swap. Many tasks charge at once, no mutex, cap never exceeded.
+- **Audit trail**: each charge is a `SpendRecord` (agent, task, session, model, tokens, cost, time).
+- **`BudgetStore`**: saves one JSON file per session (atomic writes, session ids checked so they stay in the folder).
 
 ### Counting tokens from text (feature `tokens`)
 
@@ -169,7 +167,7 @@ assert!(!c.exact);         // Anthropic's tokenizer is not public, so this is an
 
 ### Keeping prices current
 
-Prices change. Either regenerate the built-in table (`python scripts/update_prices.py`, then rebuild) or load the live file when your program starts:
+Prices change. Regenerate the table (`python scripts/update_prices.py`, then rebuild) or load the live file at startup:
 
 ```rust,no_run
 let json = std::fs::read_to_string("model_prices_and_context_window.json").expect("download it first");
@@ -196,7 +194,7 @@ Then charge with `AgentBudget::charge_model_with(&table, ...)`.
 
 ## Performance
 
-`benches/vs_alternatives.rs` charges 1 micro-dollar repeatedly against a limit that never refuses, so it measures bookkeeping only. Measured on an Intel i7-13700KF (Windows 11, release build, other work running on the machine, so treat the numbers as rough):
+`benches/vs_alternatives.rs` charges 1 micro-dollar over and over against a limit that never refuses. Bookkeeping only. Intel i7-13700KF, Windows 11, release build, other work running, so numbers are rough:
 
 | Implementation | 1 thread, per charge | 8 threads x 10,000 charges (includes thread start) |
 |---|---|---|
@@ -205,18 +203,18 @@ Then charge with `AgentBudget::charge_model_with(&table, ...)`.
 | `std::sync::Mutex<u64>` check-and-add | 9.6 ns | 6.2 ms |
 | `governor` 0.10 `check_n` (rate limiter, for scale) | 30.9 ns | 4.1 ms |
 
-0.1.1 is faster because it does not retry, but it can refuse a charge that fits when another thread's larger charge is being rolled back at the same moment (see the CHANGELOG); 0.2 trades about 2 ns per charge for never doing that. Either way the cost is noise next to an HTTP call to a model. Run `cargo bench --bench vs_alternatives` to reproduce.
+0.1.1 is faster because it doesn't retry, but it can wrongly refuse a charge during another thread's rollback (see the CHANGELOG). 0.2 costs about 2 ns more and never does. Both are noise next to an HTTP call. Reproduce: `cargo bench --bench vs_alternatives`.
 
 ## Limitations
 
-- The fleet total limits what can be handed out to agents; spending is enforced per agent.
-- Charges made directly on an `AgentBudget` you got from `get_agent` are not added to the fleet's spend counter; charge through the fleet for that.
-- Gemini models with long-context surcharges are priced at their base rate.
+- The fleet total limits what agents get. Spending is enforced per agent.
+- Charges on an `AgentBudget` from `get_agent` skip the fleet's spend counter. Charge through the fleet.
+- Gemini long-context surcharges are priced at the base rate.
 
-Run the tests with `cargo test --all-features`. Contributions are welcome, see [CONTRIBUTING.md](https://github.com/Mattbusel/llm-budget/blob/main/CONTRIBUTING.md).
+Tests: `cargo test --all-features`. Contributions welcome, see [CONTRIBUTING.md](https://github.com/Mattbusel/llm-budget/blob/main/CONTRIBUTING.md).
 
 ## License
 
 MIT, see [LICENSE](https://github.com/Mattbusel/llm-budget/blob/main/LICENSE).
 
-Source, issues and stars: [GitHub](https://github.com/Mattbusel/llm-budget). Mirror and release downloads: [GitLab](https://gitlab.com/mattbusel/llm-budget). More open-source Rust from the same author: [tensorust.com/open-source](https://tensorust.com/open-source/).
+Source, issues and stars: [GitHub](https://github.com/Mattbusel/llm-budget). Mirror and release downloads: [GitLab](https://gitlab.com/mattbusel/llm-budget). More of my Rust: [tensorust.com/open-source](https://tensorust.com/open-source/).
