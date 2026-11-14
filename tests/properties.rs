@@ -2,7 +2,8 @@
 
 #![allow(clippy::unwrap_used)]
 use llm_budget::budget::AtomicBudget;
-use llm_budget::{AgentBudget, FleetAllocator, ModelTier};
+use llm_budget::{AgentBudget, AuditLog, ChargeContext, FleetAllocator, ModelTier};
+use std::sync::Arc;
 use proptest::prelude::*;
 
 fn rt() -> tokio::runtime::Runtime {
@@ -75,6 +76,43 @@ proptest! {
         });
     }
 
+    /// Whatever mix of checked charges (some refused), forced charges and
+    /// reservations (settled or dropped) runs, the audit log adds up to the
+    /// spend, and nothing stays reserved.
+    #[test]
+    fn audit_log_sums_to_spent_under_refusals(
+        limit in 0.01f64..5.0,
+        ops in prop::collection::vec((0u8..4, 0.0f64..2.0, 0.0f64..2.0), 0..80),
+    ) {
+        rt().block_on(async {
+            let agent = AgentBudget::builder("p", limit).audit_log(AuditLog::Unbounded).build().unwrap();
+            for (kind, a, b) in ops {
+                match kind {
+                    0 => {
+                        let _ = agent.charge_usd(a, None, None).await; // may be refused
+                    }
+                    1 => {
+                        agent.charge_usd_force(a, ChargeContext::new());
+                    }
+                    2 => {
+                        if let Ok(r) = agent.reserve(a) {
+                            r.settle(b);
+                        }
+                    }
+                    _ => {
+                        // reserve and drop: must leave no trace
+                        let before = agent.spent_usd();
+                        drop(agent.reserve(a));
+                        assert_eq!(agent.spent_usd(), before);
+                    }
+                }
+                let sum: f64 = agent.audit_log().await.iter().map(|r| r.cost_usd).sum();
+                assert!((sum - agent.spent_usd()).abs() < 1e-6, "log {sum} != spent {}", agent.spent_usd());
+                assert_eq!(agent.reserved_usd(), 0.0);
+            }
+        });
+    }
+
     /// Bad numbers never panic.
     #[test]
     fn odd_inputs_do_not_panic(x in prop::num::f64::ANY) {
@@ -83,5 +121,54 @@ proptest! {
         let _ = b.charge(x);
         let _ = b.shrink_limit(x);
         prop_assert!(b.spent_usd() <= b.limit_usd() + 1e-9);
+    }
+}
+
+/// 64 threads reserve, then settle at a random fraction of 0x to 2x their
+/// estimate. Admission is atomic, so the only way past the cap is a call that
+/// cost more than its reservation: the overshoot is bounded by the sum of
+/// those settle deltas, and with no call over its estimate the cap holds exactly.
+#[test]
+fn concurrent_reservations_never_overshoot_beyond_settle_deltas() {
+    for round in 0..20u64 {
+        let limit = 10.0;
+        let agent = Arc::new(AgentBudget::builder("hot", limit).audit_log(AuditLog::Unbounded).build().unwrap());
+        let over_estimate = round % 2 == 0; // odd rounds never exceed their estimate
+        let handles: Vec<_> = (0..64u64)
+            .map(|t| {
+                let agent = agent.clone();
+                std::thread::spawn(move || {
+                    // small deterministic PRNG per thread
+                    let mut x = (t + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ round;
+                    let mut next = move || {
+                        x ^= x << 13;
+                        x ^= x >> 7;
+                        x ^= x << 17;
+                        (x % 10_000) as f64 / 10_000.0
+                    };
+                    let mut overshoot_allowance = 0.0f64;
+                    for _ in 0..200 {
+                        let estimate = 0.001 + next() * 0.05;
+                        let Ok(r) = agent.reserve(estimate) else { continue };
+                        let factor = if over_estimate { next() * 2.0 } else { next() };
+                        let actual = ((estimate * factor) * 1e9).round() / 1e9;
+                        let held = r.estimate_usd();
+                        overshoot_allowance += (actual - held).max(0.0);
+                        r.settle(actual);
+                    }
+                    overshoot_allowance
+                })
+            })
+            .collect();
+        let allowance: f64 = handles.into_iter().map(|h| h.join().unwrap()).sum();
+        let spent = agent.spent_usd();
+        assert_eq!(agent.reserved_usd(), 0.0);
+        assert!(spent <= limit + allowance + 1e-6, "round {round}: spent {spent} > {limit} + {allowance}");
+        if !over_estimate {
+            assert!(spent <= limit + 1e-9, "round {round}: spent {spent} over a hard cap of {limit}");
+        }
+        let log = rt().block_on(agent.audit_log());
+        let sum: f64 = log.iter().map(|r| r.cost_usd).sum();
+        assert!((sum - spent).abs() < 1e-6, "round {round}: log {sum} != spent {spent}");
     }
 }

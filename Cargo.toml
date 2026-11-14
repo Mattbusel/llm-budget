@@ -1,6 +1,6 @@
 [package]
 name = "llm-budget"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Hard USD spend limits for LLM agents: per-agent and fleet caps, real per-model prices, kill switch, automatic model downgrade"
@@ -33,8 +33,12 @@ metrics = ["dep:metrics"]
 schemars = ["dep:schemars"]
 ## `From<&CompletionUsage>` for async-openai users (types only, no HTTP client).
 async-openai = ["dep:async-openai"]
-## `rig::BudgetHook`, a dollar cap for rig agents (rig-agent 0.44, needs Rust 1.95).
+## `rig::BudgetHook`, a dollar cap for rig agents (rig-agent 0.44 to 0.46; needs
+## Rust 1.95 for rig-agent 0.44, 1.97.1 for 0.46).
 rig = ["dep:rig-agent"]
+## Internal: rig's mock models for this crate's rig tests and example. Not part
+## of the public API and not covered by semver.
+__rig-test-utils = ["rig", "rig-agent/test-utils"]
 
 [dependencies]
 # sync primitives for the cascade and audit log, async file I/O for BudgetStore
@@ -56,7 +60,7 @@ schemars = { version = "1", optional = true }
 # async-openai interop (feature "async-openai"), types only
 async-openai = { version = "0.42", default-features = false, features = ["chat-completion-types"], optional = true }
 # rig agent hook (feature "rig")
-rig-agent = { version = "0.44", default-features = false, optional = true }
+rig-agent = { version = ">=0.44, <0.47", default-features = false, optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.40", features = ["macros", "rt-multi-thread"] }
@@ -69,8 +73,6 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 # for benches/vs_alternatives.rs: the previous release and a rate limiter
 llm_budget_011 = { package = "llm-budget", version = "=0.1.1" }
 governor = { version = "0.10", default-features = false, features = ["std"] }
-# mock models for the rig hook tests and doc example
-rig-agent = { version = "0.44", default-features = false, features = ["test-utils"] }
 
 [[bench]]
 name = "budget_hot_path"
@@ -100,3 +102,14 @@ name = "provider_usage"
 [[example]]
 name = "rate_limit"
 required-features = ["ratelimit", "tracing"]
+
+# Runs offline against rig's mock model: cargo run --example rig_budget_hook --features __rig-test-utils
+[[example]]
+name = "rig_budget_hook"
+required-features = ["rig", "__rig-test-utils"]
+
+# rig's mock models need rig-agent's `test-utils` feature (and Rust 1.95+), so
+# these tests only build when asked for; plain `cargo test` stays on the MSRV.
+[[test]]
+name = "rig_hook"
+required-features = ["rig", "__rig-test-utils"]

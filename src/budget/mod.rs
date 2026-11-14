@@ -1,13 +1,60 @@
 //! Core budget primitives: per-agent atomic tracking and scoped envelopes.
+//!
+//! # Authorize, then settle
+//!
+//! An LLM call is paid for the moment the provider answers, so a budget has
+//! two separate jobs:
+//!
+//! 1. **Before the call**, decide whether it may happen at all. Use
+//!    [`AgentBudget::reserve`] with an estimate: it holds that much headroom
+//!    with a compare-and-swap, so N agents racing for the last dollar cannot
+//!    all be admitted. A refused reservation means the call is never made.
+//! 2. **After the call**, book what it really cost with
+//!    [`Reservation::settle`] (or [`AgentBudget::charge_usd_force`] when nothing
+//!    was reserved). Settlement always records the spend, even past the cap,
+//!    because the money is already gone; [`ChargeOutcome::over_cap`] tells you
+//!    to stop.
+//!
+//! This keeps [`AgentBudget::spent_usd`] equal to what the provider will bill,
+//! and the sum of the [audit log](AgentBudget::audit_log) equal to
+//! `spent_usd` (as long as the log keeps every record, see [`AuditLog`]).
+//!
+//! The older `charge*` methods remain: they check and book in one step and
+//! refuse (booking nothing) when the charge would cross the cap. They suit
+//! calls you price *before* making them.
+//!
+//! ```
+//! use llm_budget::{AgentBudget, ChargeContext, ModelTier};
+//!
+//! # fn main() -> Result<(), llm_budget::BudgetError> {
+//! let agent = AgentBudget::new("researcher", 1.00, ModelTier::Standard, 0.2)?;
+//!
+//! // Hold $0.30 while the call is in flight.
+//! let hold = agent.reserve(0.30)?;
+//! assert!((agent.remaining_usd() - 0.70).abs() < 1e-9);
+//!
+//! // The provider says the call cost $0.25: book exactly that.
+//! let outcome = hold.settle_with(0.25, ChargeContext::new().model("gpt-4o").tokens(80_000, 5_000));
+//! assert!(!outcome.over_cap);
+//! assert!((agent.spent_usd() - 0.25).abs() < 1e-9);
+//!
+//! // A call that ran long is still booked in full, and flagged.
+//! let outcome = agent.charge_usd_force(0.90, ChargeContext::new().task("t-7"));
+//! assert!(outcome.over_cap);
+//! assert!((agent.spent_usd() - 1.15).abs() < 1e-9);
+//! assert!(agent.reserve(0.01).is_err()); // nothing left to hold
+//! # Ok(())
+//! # }
+//! ```
 
 use crate::error::BudgetError;
-use crate::model::ModelTier;
+use crate::model::{ModelCascade, ModelTier};
 use crate::pricing::PriceTable;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use tokio::sync::RwLock;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-/// One accepted charge, kept in the audit log.
+/// One booked charge, kept in the audit log.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct SpendRecord {
@@ -44,13 +91,156 @@ pub struct ChargeReceipt {
     pub downgraded_to: Option<ModelTier>,
 }
 
+/// What a settlement ([`Reservation::settle`], [`AgentBudget::charge_usd_force`])
+/// booked. Settlement never fails: the spend is always recorded.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[non_exhaustive]
+pub struct ChargeOutcome {
+    /// What was booked for this charge, in USD (rounded to whole nano-dollars).
+    pub recorded_usd: f64,
+    /// Total spent by this agent after the charge, in USD. May exceed the cap.
+    pub total_spent_usd: f64,
+    /// True when, after this charge, spend plus in-flight reservations is
+    /// above the cap. Stop making calls on this budget.
+    pub over_cap: bool,
+    /// Set when this charge pushed the agent down to a cheaper tier.
+    pub downgraded_to: Option<ModelTier>,
+}
+
+/// Who and what a charge was for, recorded in its [`SpendRecord`].
+///
+/// ```
+/// use llm_budget::ChargeContext;
+/// let ctx = ChargeContext::new().task("t-1").session("s-9").model("gpt-4o").tokens(1_200, 300);
+/// assert_eq!(ctx.task_id.as_deref(), Some("t-1"));
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ChargeContext {
+    /// Task the charge belongs to.
+    pub task_id: Option<String>,
+    /// Session the charge belongs to.
+    pub session_id: Option<String>,
+    /// Model that was called.
+    pub model: Option<String>,
+    /// Prompt tokens.
+    pub input_tokens: u32,
+    /// Completion tokens.
+    pub output_tokens: u32,
+}
+
+impl ChargeContext {
+    /// An empty context.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Attach a task id.
+    pub fn task(mut self, task_id: impl Into<String>) -> Self {
+        self.task_id = Some(task_id.into());
+        self
+    }
+
+    /// Attach a session id.
+    pub fn session(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
+    }
+
+    /// Record which model was called.
+    pub fn model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
+    }
+
+    /// Record the token counts (saturating at `u32::MAX`).
+    pub fn tokens(mut self, input_tokens: u64, output_tokens: u64) -> Self {
+        self.input_tokens = u32::try_from(input_tokens).unwrap_or(u32::MAX);
+        self.output_tokens = u32::try_from(output_tokens).unwrap_or(u32::MAX);
+        self
+    }
+}
+
+/// How much of the audit log an envelope keeps in memory.
+///
+/// Every booked charge produces one [`SpendRecord`]. A long-running service
+/// would grow an unbounded log forever, so the default keeps the most recent
+/// 1,024 records. Use [`drain_audit_log`](AgentBudget::drain_audit_log) to
+/// ship records elsewhere (a database, a file) before they are evicted, and
+/// [`audit_records_dropped`](AgentBudget::audit_records_dropped) to see whether
+/// any were.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub enum AuditLog {
+    /// Keep no records.
+    None,
+    /// Keep the most recent `n` records; older ones are evicted.
+    Ring(usize),
+    /// Keep every record (memory grows with every charge).
+    Unbounded,
+}
+
+impl Default for AuditLog {
+    /// `Ring(1024)`.
+    fn default() -> Self {
+        AuditLog::Ring(1024)
+    }
+}
+
+#[derive(Debug, Default)]
+struct AuditBuffer {
+    mode: AuditLog,
+    records: VecDeque<SpendRecord>,
+    dropped: u64,
+}
+
+impl AuditBuffer {
+    fn new(mode: AuditLog) -> Self {
+        let mut b = Self { mode, ..Self::default() };
+        b.trim();
+        b
+    }
+
+    fn push(&mut self, record: SpendRecord) {
+        self.records.push_back(record);
+        self.trim();
+    }
+
+    fn trim(&mut self) {
+        let cap = match self.mode {
+            AuditLog::None => 0,
+            AuditLog::Ring(n) => n,
+            AuditLog::Unbounded => return,
+        };
+        while self.records.len() > cap {
+            self.records.pop_front();
+            self.dropped += 1;
+        }
+    }
+}
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    // Every critical section here is a few field updates that cannot leave the
+    // data half-written, so a poisoned lock is still safe to use.
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// Lock-free spend counter with a hard limit.
 ///
 /// Amounts are stored as whole nano-dollars (1 USD = 1,000,000,000) in atomics,
-/// so concurrent charges from many threads never need a mutex and the limit is
-/// never exceeded.
+/// so concurrent charges from many threads never need a mutex. [`charge`](Self::charge)
+/// never takes the counter past the limit; [`charge_force`](Self::charge_force)
+/// books spend that already happened and may.
+///
+/// Headroom held by in-flight reservations ([`AgentBudget::reserve`]) counts
+/// against the limit, so it is not available to other charges, but it is not
+/// part of [`spent_usd`](Self::spent_usd) until it is settled.
 pub struct AtomicBudget {
-    spent_nanos: AtomicU64,
+    /// Settled spend plus in-flight reservations. The limit is enforced on this.
+    committed_nanos: AtomicU64,
+    /// In-flight reservations (a part of `committed_nanos`).
+    reserved_nanos: AtomicU64,
     limit_nanos: AtomicU64,
 }
 
@@ -64,7 +254,8 @@ impl AtomicBudget {
             return Err(BudgetError::InvalidConfig("limit must be positive".into()));
         }
         Ok(Self {
-            spent_nanos: AtomicU64::new(0),
+            committed_nanos: AtomicU64::new(0),
+            reserved_nanos: AtomicU64::new(0),
             limit_nanos: AtomicU64::new(usd_to_nanos(limit_usd)),
         })
     }
@@ -75,37 +266,93 @@ impl AtomicBudget {
     /// Uses a compare-and-swap loop, so a charge that fits is never refused
     /// because another, larger charge was racing with it.
     pub fn charge(&self, cost_usd: f64) -> Result<f64, f64> {
-        let cost = usd_to_nanos(cost_usd);
+        match self.try_commit(usd_to_nanos(cost_usd)) {
+            Ok(committed) => Ok(self.settled_usd(committed)),
+            Err(committed) => Err(self.settled_usd(committed)),
+        }
+    }
+
+    /// Book `cost_usd` unconditionally, even past the limit (saturating at
+    /// `u64::MAX` nano-dollars). Use it for spend that has already happened.
+    /// Negative, NaN and infinite amounts book nothing. Returns the new total.
+    pub fn charge_force(&self, cost_usd: f64) -> f64 {
+        let committed = self.settle_nanos(0, usd_to_nanos(sanitize_usd(cost_usd)));
+        self.settled_usd(committed)
+    }
+
+    /// Settled spend for a committed total read a moment ago.
+    fn settled_usd(&self, committed: u64) -> f64 {
+        nanos_to_usd(committed.saturating_sub(self.reserved_nanos.load(Ordering::SeqCst)))
+    }
+
+    /// CAS-add `nanos` to the committed counter if it stays within the limit.
+    /// Returns the new committed total or the committed total that blocked it.
+    fn try_commit(&self, nanos: u64) -> Result<u64, u64> {
         loop {
-            let spent = self.spent_nanos.load(Ordering::SeqCst);
-            let new_total = spent.saturating_add(cost);
+            let committed = self.committed_nanos.load(Ordering::SeqCst);
+            let new_total = committed.saturating_add(nanos);
             if new_total > self.limit_nanos.load(Ordering::SeqCst) {
-                return Err(nanos_to_usd(spent));
+                return Err(committed);
             }
             if self
-                .spent_nanos
-                .compare_exchange_weak(spent, new_total, Ordering::SeqCst, Ordering::SeqCst)
+                .committed_nanos
+                .compare_exchange_weak(committed, new_total, Ordering::SeqCst, Ordering::SeqCst)
                 .is_ok()
             {
                 // A concurrent shrink_limit may have lowered the limit between
                 // our check and our write. Undo in that case so the cap holds.
                 if new_total > self.limit_nanos.load(Ordering::SeqCst) {
-                    self.spent_nanos.fetch_sub(cost, Ordering::SeqCst);
-                    return Err(nanos_to_usd(spent));
+                    self.committed_nanos.fetch_sub(nanos, Ordering::SeqCst);
+                    return Err(committed);
                 }
-                return Ok(nanos_to_usd(new_total));
+                return Ok(new_total);
             }
         }
     }
 
-    /// Lower the limit by `amount_usd`, but only if the unspent part covers it.
-    /// Returns the new limit, or `Err(remaining)` if there is not enough left.
+    /// Hold `nanos` of headroom. Returns `Err(spent_usd)` if it does not fit.
+    pub(crate) fn reserve_nanos(&self, nanos: u64) -> Result<(), f64> {
+        // Reserved is raised after committed, and lowered before it, so
+        // `committed >= reserved` always holds.
+        self.try_commit(nanos).map_err(|_| self.spent_usd())?;
+        self.reserved_nanos.fetch_add(nanos, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Release a reservation of `reserved` nanos and book `actual` nanos in its
+    /// place, in one update of the committed counter. Returns the committed
+    /// total afterwards.
+    pub(crate) fn settle_nanos(&self, reserved: u64, actual: u64) -> u64 {
+        if reserved > 0 {
+            sub_saturating(&self.reserved_nanos, reserved);
+        }
+        let mut current = self.committed_nanos.load(Ordering::SeqCst);
+        loop {
+            let next = current.saturating_sub(reserved).saturating_add(actual);
+            match self
+                .committed_nanos
+                .compare_exchange_weak(current, next, Ordering::SeqCst, Ordering::SeqCst)
+            {
+                Ok(_) => return next,
+                Err(seen) => current = seen,
+            }
+        }
+    }
+
+    /// True when the committed total is above the limit.
+    pub(crate) fn over_limit(&self, committed: u64) -> bool {
+        committed > self.limit_nanos.load(Ordering::SeqCst)
+    }
+
+    /// Lower the limit by `amount_usd`, but only if the unspent, unreserved
+    /// part covers it. Returns the new limit, or `Err(remaining)` if there is
+    /// not enough left.
     pub fn shrink_limit(&self, amount_usd: f64) -> Result<f64, f64> {
         let amount = usd_to_nanos(amount_usd);
         loop {
             let limit = self.limit_nanos.load(Ordering::SeqCst);
-            let spent = self.spent_nanos.load(Ordering::SeqCst);
-            let remaining = limit.saturating_sub(spent);
+            let committed = self.committed_nanos.load(Ordering::SeqCst);
+            let remaining = limit.saturating_sub(committed);
             if amount > remaining {
                 return Err(nanos_to_usd(remaining));
             }
@@ -116,12 +363,12 @@ impl AtomicBudget {
                 .is_ok()
             {
                 // Store-then-load on both sides: if a charge slipped in, give the room back.
-                if self.spent_nanos.load(Ordering::SeqCst) > new_limit {
+                if self.committed_nanos.load(Ordering::SeqCst) > new_limit {
                     self.limit_nanos.fetch_add(amount, Ordering::SeqCst);
                     let remaining = self
                         .limit_nanos
                         .load(Ordering::SeqCst)
-                        .saturating_sub(self.spent_nanos.load(Ordering::SeqCst));
+                        .saturating_sub(self.committed_nanos.load(Ordering::SeqCst));
                     return Err(nanos_to_usd(remaining));
                 }
                 return Ok(nanos_to_usd(new_limit));
@@ -135,15 +382,25 @@ impl AtomicBudget {
         nanos_to_usd(self.limit_nanos.fetch_add(amount, Ordering::SeqCst).saturating_add(amount))
     }
 
-    /// Current spend in USD.
+    /// Settled spend in USD (in-flight reservations are not included).
+    ///
+    /// Exact whenever no reservation is being taken or settled at the same
+    /// moment; while one is, a reading can be off by that reservation.
     pub fn spent_usd(&self) -> f64 {
-        nanos_to_usd(self.spent_nanos.load(Ordering::SeqCst))
+        let reserved = self.reserved_nanos.load(Ordering::SeqCst);
+        let committed = self.committed_nanos.load(Ordering::SeqCst);
+        nanos_to_usd(committed.saturating_sub(reserved))
     }
 
-    /// Remaining budget in USD.
+    /// Headroom held by in-flight reservations, in USD.
+    pub fn reserved_usd(&self) -> f64 {
+        nanos_to_usd(self.reserved_nanos.load(Ordering::SeqCst))
+    }
+
+    /// Remaining budget in USD: the limit minus spend and in-flight reservations.
     pub fn remaining_usd(&self) -> f64 {
-        let spent = self.spent_nanos.load(Ordering::SeqCst);
-        nanos_to_usd(self.limit_nanos.load(Ordering::SeqCst).saturating_sub(spent))
+        let committed = self.committed_nanos.load(Ordering::SeqCst);
+        nanos_to_usd(self.limit_nanos.load(Ordering::SeqCst).saturating_sub(committed))
     }
 
     /// Hard limit in USD.
@@ -151,18 +408,29 @@ impl AtomicBudget {
         nanos_to_usd(self.limit_nanos.load(Ordering::SeqCst))
     }
 
-    /// Whether the budget has been exhausted.
+    /// Whether nothing is left to spend or reserve.
     pub fn is_exhausted(&self) -> bool {
-        self.spent_nanos.load(Ordering::SeqCst) >= self.limit_nanos.load(Ordering::SeqCst)
+        self.committed_nanos.load(Ordering::SeqCst) >= self.limit_nanos.load(Ordering::SeqCst)
     }
 
-    /// Fraction consumed: 0.0 = untouched, 1.0 = fully spent.
+    /// Fraction consumed (spend plus reservations): 0.0 = untouched, 1.0 =
+    /// fully spent. Can exceed 1.0 after a forced charge.
     pub fn utilization(&self) -> f64 {
         let limit = self.limit_nanos.load(Ordering::SeqCst);
         if limit == 0 {
             return 1.0;
         }
-        self.spent_nanos.load(Ordering::SeqCst) as f64 / limit as f64
+        self.committed_nanos.load(Ordering::SeqCst) as f64 / limit as f64
+    }
+}
+
+fn sub_saturating(a: &AtomicU64, n: u64) {
+    let mut current = a.load(Ordering::SeqCst);
+    loop {
+        match a.compare_exchange_weak(current, current.saturating_sub(n), Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return,
+            Err(seen) => current = seen,
+        }
     }
 }
 
@@ -175,6 +443,15 @@ pub(crate) fn nanos_to_usd(nanos: u64) -> f64 {
     nanos as f64 / 1_000_000_000.0
 }
 
+/// Negative, NaN and infinite amounts become 0.
+fn sanitize_usd(usd: f64) -> f64 {
+    if usd.is_finite() && usd > 0.0 {
+        usd
+    } else {
+        0.0
+    }
+}
+
 /// A budget with a scope (agent, task or session), a kill switch and an audit log.
 #[derive(Clone)]
 pub struct BudgetEnvelope {
@@ -185,7 +462,7 @@ pub struct BudgetEnvelope {
     inner: Arc<AtomicBudget>,
     killed: Arc<AtomicBool>,
     kill_reason: Arc<Mutex<Option<String>>>,
-    log: Arc<RwLock<Vec<SpendRecord>>>,
+    log: Arc<Mutex<AuditBuffer>>,
 }
 
 /// The kind of thing a [`BudgetEnvelope`] limits.
@@ -201,7 +478,8 @@ pub enum ScopeKind {
 }
 
 impl BudgetEnvelope {
-    /// Create an envelope with a hard cap of `limit_usd`.
+    /// Create an envelope with a hard cap of `limit_usd` and the default
+    /// [`AuditLog`] (the last 1,024 records).
     ///
     /// # Errors
     /// [`BudgetError::InvalidConfig`] if the limit is not positive.
@@ -212,8 +490,18 @@ impl BudgetEnvelope {
             inner: Arc::new(AtomicBudget::new(limit_usd)?),
             killed: Arc::new(AtomicBool::new(false)),
             kill_reason: Arc::new(Mutex::new(None)),
-            log: Arc::new(RwLock::new(Vec::new())),
+            log: Arc::new(Mutex::new(AuditBuffer::new(AuditLog::default()))),
         })
+    }
+
+    /// Keep the audit log as `mode` says (trims what is already there).
+    pub fn with_audit_log(self, mode: AuditLog) -> Self {
+        {
+            let mut log = lock(&self.log);
+            log.mode = mode;
+            log.trim();
+        }
+        self
     }
 
     /// Charge `record.cost_usd` to this envelope. Returns the new total, or a typed error.
@@ -222,41 +510,63 @@ impl BudgetEnvelope {
     /// [`BudgetError::KillSwitchActivated`] after [`kill`](Self::kill), or the
     /// `*Exhausted` variant matching the scope when the cap would be crossed.
     pub async fn charge(&self, record: SpendRecord) -> Result<f64, BudgetError> {
+        self.check_alive()?;
+        match self.inner.charge(record.cost_usd) {
+            Ok(total) => {
+                lock(&self.log).push(record);
+                Ok(total)
+            }
+            Err(spent) => Err(self.exhausted(spent)),
+        }
+    }
+
+    /// Book `record.cost_usd` whatever the cap or the kill switch say, and log
+    /// it: for spend that has already happened. Negative, NaN and infinite
+    /// amounts book $0.
+    pub fn charge_force(&self, mut record: SpendRecord) -> ChargeOutcome {
+        record.cost_usd = nanos_to_usd(usd_to_nanos(sanitize_usd(record.cost_usd)));
+        let recorded_usd = record.cost_usd;
+        let (total_spent_usd, over_cap) = self.book(record, 0);
+        ChargeOutcome { recorded_usd, total_spent_usd, over_cap, downgraded_to: None }
+    }
+
+    /// Release `reserved` nanos and book the record's cost in their place.
+    /// Returns the settled total and whether the cap is now crossed.
+    fn book(&self, record: SpendRecord, reserved: u64) -> (f64, bool) {
+        let committed = self.inner.settle_nanos(reserved, usd_to_nanos(sanitize_usd(record.cost_usd)));
+        lock(&self.log).push(record);
+        (self.inner.settled_usd(committed), self.inner.over_limit(committed))
+    }
+
+    fn check_alive(&self) -> Result<(), BudgetError> {
         if self.killed.load(Ordering::SeqCst) {
             return Err(BudgetError::KillSwitchActivated {
                 agent_id: self.scope_id.clone(),
                 reason: self.kill_reason().unwrap_or_else(|| "kill switch is active".into()),
             });
         }
+        Ok(())
+    }
 
-        match self.inner.charge(record.cost_usd) {
-            Ok(total) => {
-                self.log.write().await.push(record);
-                Ok(total)
-            }
-            Err(spent) => {
-                let limit = self.inner.limit_usd();
-                let id = self.scope_id.clone();
-                Err(match self.scope_kind {
-                    ScopeKind::Agent => BudgetError::AgentExhausted { agent_id: id, spent, limit },
-                    ScopeKind::Task => BudgetError::TaskExhausted { task_id: id, spent, limit },
-                    ScopeKind::Session => BudgetError::SessionExhausted { session_id: id, spent, limit },
-                })
-            }
+    fn exhausted(&self, spent: f64) -> BudgetError {
+        let limit = self.inner.limit_usd();
+        let id = self.scope_id.clone();
+        match self.scope_kind {
+            ScopeKind::Agent => BudgetError::AgentExhausted { agent_id: id, spent, limit },
+            ScopeKind::Task => BudgetError::TaskExhausted { task_id: id, spent, limit },
+            ScopeKind::Session => BudgetError::SessionExhausted { session_id: id, spent, limit },
         }
     }
 
     /// Activate the kill switch: every later charge is refused with `reason`.
     pub fn kill(&self, reason: &str) {
-        if let Ok(mut r) = self.kill_reason.lock() {
-            *r = Some(reason.to_string());
-        }
+        *lock(&self.kill_reason) = Some(reason.to_string());
         self.killed.store(true, Ordering::SeqCst);
     }
 
     /// The reason given to [`kill`](Self::kill), if the switch is active.
     pub fn kill_reason(&self) -> Option<String> {
-        self.kill_reason.lock().ok().and_then(|r| r.clone())
+        lock(&self.kill_reason).clone()
     }
 
     /// True once [`kill`](Self::kill) has been called.
@@ -267,6 +577,11 @@ impl BudgetEnvelope {
     /// Spent so far, in USD.
     pub fn spent_usd(&self) -> f64 {
         self.inner.spent_usd()
+    }
+
+    /// Held by in-flight reservations, in USD.
+    pub fn reserved_usd(&self) -> f64 {
+        self.inner.reserved_usd()
     }
 
     /// Left to spend, in USD.
@@ -284,14 +599,25 @@ impl BudgetEnvelope {
         self.inner.is_exhausted()
     }
 
-    /// Fraction of the cap spent (0.0 to 1.0).
+    /// Fraction of the cap spent (0.0 to 1.0, above 1.0 after a forced charge).
     pub fn utilization(&self) -> f64 {
         self.inner.utilization()
     }
 
-    /// Every accepted charge, oldest first.
+    /// The records the log still holds, oldest first (see [`AuditLog`]).
     pub async fn audit_log(&self) -> Vec<SpendRecord> {
-        self.log.read().await.clone()
+        lock(&self.log).records.iter().cloned().collect()
+    }
+
+    /// Take every record the log holds, oldest first, leaving it empty.
+    pub fn drain_audit_log(&self) -> Vec<SpendRecord> {
+        lock(&self.log).records.drain(..).collect()
+    }
+
+    /// How many records were evicted (or never kept) because of the
+    /// [`AuditLog`] setting. Drained records do not count.
+    pub fn audit_records_dropped(&self) -> u64 {
+        lock(&self.log).dropped
     }
 
     pub(crate) fn atomic(&self) -> &AtomicBudget {
@@ -326,13 +652,60 @@ pub struct AgentBudget {
     /// Agent name.
     pub agent_id: String,
     envelope: BudgetEnvelope,
-    cascade: tokio::sync::Mutex<crate::model::ModelCascade>,
+    cascade: Arc<Mutex<ModelCascade>>,
+}
+
+/// Builds an [`AgentBudget`]; see [`AgentBudget::builder`].
+#[derive(Debug, Clone)]
+pub struct AgentBudgetBuilder {
+    agent_id: String,
+    limit_usd: f64,
+    tier: ModelTier,
+    cascade_threshold: f64,
+    audit_log: AuditLog,
+}
+
+impl AgentBudgetBuilder {
+    /// The tier the agent starts on (default [`ModelTier::Standard`]).
+    pub fn tier(mut self, tier: ModelTier) -> Self {
+        self.tier = tier;
+        self
+    }
+
+    /// Step down one tier whenever the remaining fraction of the budget is at
+    /// or below this (0.0 to 1.0, default 0.2).
+    pub fn cascade_threshold(mut self, threshold: f64) -> Self {
+        self.cascade_threshold = threshold;
+        self
+    }
+
+    /// How much of the audit log to keep in memory (default `Ring(1024)`).
+    pub fn audit_log(mut self, mode: AuditLog) -> Self {
+        self.audit_log = mode;
+        self
+    }
+
+    /// Build the budget.
+    ///
+    /// # Errors
+    /// [`BudgetError::InvalidConfig`] for a non-positive limit or a threshold outside 0..=1.
+    pub fn build(self) -> Result<AgentBudget, BudgetError> {
+        let envelope = BudgetEnvelope::new(self.agent_id.clone(), ScopeKind::Agent, self.limit_usd)?
+            .with_audit_log(self.audit_log);
+        let cascade = ModelCascade::new(self.tier, self.cascade_threshold, self.limit_usd)?;
+        Ok(AgentBudget {
+            agent_id: self.agent_id,
+            envelope,
+            cascade: Arc::new(Mutex::new(cascade)),
+        })
+    }
 }
 
 impl AgentBudget {
     /// Create an agent with a `limit_usd` cap, starting on `initial_tier`, that
     /// steps down one tier whenever the remaining fraction of its budget is at
-    /// or below `cascade_threshold` (0.0 to 1.0).
+    /// or below `cascade_threshold` (0.0 to 1.0). The audit log keeps the last
+    /// 1,024 records; use [`builder`](Self::builder) to change that.
     ///
     /// # Errors
     /// [`BudgetError::InvalidConfig`] for a non-positive limit or a threshold outside 0..=1.
@@ -342,14 +715,33 @@ impl AgentBudget {
         initial_tier: ModelTier,
         cascade_threshold: f64,
     ) -> Result<Self, BudgetError> {
-        let id = agent_id.into();
-        let envelope = BudgetEnvelope::new(id.clone(), ScopeKind::Agent, limit_usd)?;
-        let cascade = crate::model::ModelCascade::new(initial_tier, cascade_threshold, limit_usd)?;
-        Ok(Self {
-            agent_id: id,
-            envelope,
-            cascade: tokio::sync::Mutex::new(cascade),
-        })
+        Self::builder(agent_id, limit_usd)
+            .tier(initial_tier)
+            .cascade_threshold(cascade_threshold)
+            .build()
+    }
+
+    /// Start building an agent budget with a `limit_usd` cap.
+    ///
+    /// ```
+    /// use llm_budget::{AgentBudget, AuditLog, ModelTier};
+    /// # fn main() -> Result<(), llm_budget::BudgetError> {
+    /// let agent = AgentBudget::builder("indexer", 25.0)
+    ///     .tier(ModelTier::Economy)
+    ///     .audit_log(AuditLog::Ring(10_000))
+    ///     .build()?;
+    /// assert_eq!(agent.limit_usd(), 25.0);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn builder(agent_id: impl Into<String>, limit_usd: f64) -> AgentBudgetBuilder {
+        AgentBudgetBuilder {
+            agent_id: agent_id.into(),
+            limit_usd,
+            tier: ModelTier::Standard,
+            cascade_threshold: 0.2,
+            audit_log: AuditLog::default(),
+        }
     }
 
     /// Charge a request priced by the agent's current [`ModelTier`] (a rough
@@ -428,6 +820,11 @@ impl AgentBudget {
 
     /// Charge an exact dollar amount (for example the cost your provider reported).
     ///
+    /// The charge is refused, and nothing is booked, if it would cross the
+    /// cap. For a call that has already been made, use
+    /// [`charge_usd_force`](Self::charge_usd_force) instead so the spend is
+    /// not lost.
+    ///
     /// # Errors
     /// [`BudgetError::InvalidConfig`] for a negative or non-finite amount,
     /// otherwise see [`BudgetEnvelope::charge`].
@@ -443,6 +840,49 @@ impl AgentBudget {
         self.charge_inner(None, Some(cost_usd), 0, 0, task_id, session_id).await
     }
 
+    /// Book `cost_usd` of spend that has already happened, whatever the cap
+    /// and the kill switch say, and write it to the audit log.
+    ///
+    /// Use this after a provider call you did not [`reserve`](Self::reserve)
+    /// for: refusing it would only make [`spent_usd`](Self::spent_usd) lower
+    /// than the bill. Check [`ChargeOutcome::over_cap`] to decide whether to
+    /// keep going. Negative, NaN and infinite amounts book $0.
+    pub fn charge_usd_force(&self, cost_usd: f64, ctx: ChargeContext) -> ChargeOutcome {
+        settle(&self.agent_id, &self.envelope, &self.cascade, 0, cost_usd, ctx)
+    }
+
+    /// Hold `estimate_usd` of headroom for a call you are about to make.
+    ///
+    /// The hold is taken with a compare-and-swap against the cap, so
+    /// concurrent callers can never be admitted for more than the cap in
+    /// total. Book the real cost with [`Reservation::settle`]; dropping the
+    /// reservation without settling releases the hold.
+    ///
+    /// # Errors
+    /// [`BudgetError::InvalidConfig`] for a negative or non-finite estimate,
+    /// [`BudgetError::KillSwitchActivated`] after [`kill`](Self::kill), or
+    /// [`BudgetError::AgentExhausted`] when the estimate does not fit in what
+    /// is left.
+    pub fn reserve(&self, estimate_usd: f64) -> Result<Reservation, BudgetError> {
+        if !estimate_usd.is_finite() || estimate_usd < 0.0 {
+            return Err(BudgetError::InvalidConfig(format!("estimate must be >= 0, got {estimate_usd}")));
+        }
+        self.envelope.check_alive()?;
+        let nanos = usd_to_nanos(estimate_usd);
+        if let Err(spent) = self.envelope.atomic().reserve_nanos(nanos) {
+            let e = self.envelope.exhausted(spent);
+            crate::observe::refused(&self.agent_id, false, &e.to_string());
+            return Err(e);
+        }
+        Ok(Reservation {
+            agent_id: self.agent_id.clone(),
+            envelope: self.envelope.clone(),
+            cascade: Arc::clone(&self.cascade),
+            nanos,
+            open: true,
+        })
+    }
+
     pub(crate) async fn charge_inner(
         &self,
         model: Option<&str>,
@@ -452,7 +892,7 @@ impl AgentBudget {
         task_id: Option<String>,
         session_id: Option<String>,
     ) -> Result<ChargeReceipt, BudgetError> {
-        let current_tier = self.cascade.lock().await.current();
+        let current_tier = lock(&self.cascade).current();
         let cost = cost.unwrap_or_else(|| current_tier.estimate_cost(input_tokens, output_tokens));
         // Round the same way the atomic counter does, so receipts add up exactly.
         let cost = nanos_to_usd(usd_to_nanos(cost));
@@ -479,7 +919,7 @@ impl AgentBudget {
         };
         let remaining = self.envelope.remaining_usd();
         crate::observe::charged(&self.agent_id, model, cost, total, remaining);
-        let downgraded_to = self.cascade.lock().await.evaluate(remaining);
+        let downgraded_to = lock(&self.cascade).evaluate(remaining);
         if let Some(tier) = downgraded_to {
             crate::observe::downgraded(&self.agent_id, tier);
         }
@@ -497,12 +937,17 @@ impl AgentBudget {
         self.envelope.is_killed()
     }
 
-    /// Spent so far, in USD.
+    /// Settled spend so far, in USD (in-flight reservations not included).
     pub fn spent_usd(&self) -> f64 {
         self.envelope.spent_usd()
     }
 
-    /// Left to spend, in USD.
+    /// Held by in-flight reservations, in USD.
+    pub fn reserved_usd(&self) -> f64 {
+        self.envelope.reserved_usd()
+    }
+
+    /// Left to spend or reserve, in USD.
     pub fn remaining_usd(&self) -> f64 {
         self.envelope.remaining_usd()
     }
@@ -512,27 +957,44 @@ impl AgentBudget {
         self.envelope.limit_usd()
     }
 
-    /// The tier the agent should use for its next call.
-    pub async fn current_tier(&self) -> ModelTier {
-        self.cascade.lock().await.current()
+    /// True when nothing is left to spend or reserve.
+    pub fn is_exhausted(&self) -> bool {
+        self.envelope.is_exhausted()
     }
 
-    /// Every accepted charge, oldest first.
+    /// The tier the agent should use for its next call.
+    pub async fn current_tier(&self) -> ModelTier {
+        lock(&self.cascade).current()
+    }
+
+    /// The records the audit log still holds, oldest first (see [`AuditLog`]).
     pub async fn audit_log(&self) -> Vec<SpendRecord> {
         self.envelope.audit_log().await
+    }
+
+    /// Take every record the audit log holds, oldest first, leaving it empty.
+    /// Call it periodically to ship records to your own storage.
+    pub fn drain_audit_log(&self) -> Vec<SpendRecord> {
+        self.envelope.drain_audit_log()
+    }
+
+    /// How many audit records were evicted or never kept because of the
+    /// [`AuditLog`] setting.
+    pub fn audit_records_dropped(&self) -> u64 {
+        self.envelope.audit_records_dropped()
     }
 
     /// Move `amount_usd` of unspent cap out of this agent. Returns the new cap.
     pub(crate) async fn shrink_limit(&self, amount_usd: f64) -> Result<f64, f64> {
         let new_limit = self.envelope.atomic().shrink_limit(amount_usd)?;
-        self.cascade.lock().await.set_total_budget(new_limit);
+        lock(&self.cascade).set_total_budget(new_limit);
         Ok(new_limit)
     }
 
     /// Add `amount_usd` to this agent's cap. Returns the new cap.
     pub(crate) async fn grow_limit(&self, amount_usd: f64) -> f64 {
         let new_limit = self.envelope.atomic().grow_limit(amount_usd);
-        self.cascade.lock().await.set_total_budget(new_limit);
+        lock(&self.cascade).set_total_budget(new_limit);
         new_limit
     }
 
@@ -545,9 +1007,98 @@ impl AgentBudget {
             remaining_usd: self.envelope.remaining_usd(),
             utilization: self.envelope.utilization(),
             is_killed: self.envelope.is_killed(),
-            model_tier: self.cascade.lock().await.current(),
+            model_tier: lock(&self.cascade).current(),
             timestamp_ms: now_ms(),
         }
+    }
+}
+
+/// Release `reserved` nanos and book `cost_usd` in their place, with a log
+/// record, observability events and a cascade check.
+fn settle(
+    agent_id: &str,
+    envelope: &BudgetEnvelope,
+    cascade: &Mutex<ModelCascade>,
+    reserved: u64,
+    cost_usd: f64,
+    ctx: ChargeContext,
+) -> ChargeOutcome {
+    let current_tier = lock(cascade).current();
+    let cost = nanos_to_usd(usd_to_nanos(sanitize_usd(cost_usd)));
+    let model = ctx.model;
+    let record = SpendRecord {
+        agent_id: agent_id.to_string(),
+        task_id: ctx.task_id,
+        session_id: ctx.session_id,
+        model_tier: current_tier,
+        model: model.clone(),
+        input_tokens: ctx.input_tokens,
+        output_tokens: ctx.output_tokens,
+        cost_usd: cost,
+        timestamp_ms: now_ms(),
+    };
+    let (total, over_cap) = envelope.book(record, reserved);
+    let remaining = envelope.remaining_usd();
+    crate::observe::charged(agent_id, model.as_deref(), cost, total, remaining);
+    let downgraded_to = lock(cascade).evaluate(remaining);
+    if let Some(tier) = downgraded_to {
+        crate::observe::downgraded(agent_id, tier);
+    }
+    ChargeOutcome { recorded_usd: cost, total_spent_usd: total, over_cap, downgraded_to }
+}
+
+/// Headroom held for one in-flight call; see [`AgentBudget::reserve`].
+///
+/// Settle it with the real cost once the call returns. If it is dropped
+/// unsettled (the call failed, the task was cancelled) the hold is released
+/// and nothing is booked.
+#[must_use = "dropping a Reservation releases it; call settle() with the real cost"]
+pub struct Reservation {
+    agent_id: String,
+    envelope: BudgetEnvelope,
+    cascade: Arc<Mutex<ModelCascade>>,
+    nanos: u64,
+    open: bool,
+}
+
+impl Reservation {
+    /// The amount held, in USD.
+    pub fn estimate_usd(&self) -> f64 {
+        nanos_to_usd(self.nanos)
+    }
+
+    /// Release the hold and book `actual_usd`, even if it is more than the
+    /// estimate and takes the agent past its cap. Negative, NaN and infinite
+    /// amounts book $0.
+    pub fn settle(self, actual_usd: f64) -> ChargeOutcome {
+        self.settle_with(actual_usd, ChargeContext::default())
+    }
+
+    /// [`settle`](Self::settle), recording `ctx` in the audit log.
+    pub fn settle_with(mut self, actual_usd: f64, ctx: ChargeContext) -> ChargeOutcome {
+        self.open = false;
+        settle(&self.agent_id, &self.envelope, &self.cascade, self.nanos, actual_usd, ctx)
+    }
+
+    /// Release the hold without booking anything (same as dropping it).
+    pub fn release(self) {}
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        if self.open {
+            self.envelope.atomic().settle_nanos(self.nanos, 0);
+        }
+    }
+}
+
+impl std::fmt::Debug for Reservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Reservation")
+            .field("agent_id", &self.agent_id)
+            .field("estimate_usd", &self.estimate_usd())
+            .field("open", &self.open)
+            .finish()
     }
 }
 
@@ -856,5 +1407,114 @@ mod tests {
         .expect("usage");
         let r = agent.charge_usage("gpt-4o", &u, None, None).await.expect("charge");
         assert!((r.cost_usd - (0.25 + 1.125)).abs() < 1e-9, "{}", r.cost_usd);
+    }
+    // ── 0.3.0: settlement, reservations, bounded audit log ─────────────────
+
+    #[tokio::test]
+    async fn test_force_charge_books_past_the_cap_and_the_kill_switch() {
+        let agent = AgentBudget::new("a", 1.0, ModelTier::Standard, 0.1).expect("new");
+        agent.charge_usd(0.9, None, None).await.expect("fits");
+        assert!(agent.charge_usd(0.5, None, None).await.is_err());
+        let out = agent.charge_usd_force(0.5, ChargeContext::new().task("t"));
+        assert!(out.over_cap);
+        assert!((out.recorded_usd - 0.5).abs() < 1e-12);
+        assert!((agent.spent_usd() - 1.4).abs() < 1e-9);
+        agent.kill("stop");
+        let out = agent.charge_usd_force(0.1, ChargeContext::default());
+        assert!((out.total_spent_usd - 1.5).abs() < 1e-9);
+        let log = agent.audit_log().await;
+        assert_eq!(log.len(), 3);
+        assert_eq!(log[1].task_id.as_deref(), Some("t"));
+        let sum: f64 = log.iter().map(|r| r.cost_usd).sum();
+        assert!((sum - agent.spent_usd()).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_force_charge_ignores_bad_amounts() {
+        let agent = AgentBudget::new("a", 1.0, ModelTier::Standard, 0.1).expect("new");
+        for x in [f64::NAN, -1.0, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(agent.charge_usd_force(x, ChargeContext::new()).recorded_usd, 0.0);
+        }
+        assert_eq!(agent.spent_usd(), 0.0);
+    }
+
+    #[test]
+    fn test_reservation_holds_headroom_and_drop_releases_it() {
+        let agent = AgentBudget::new("a", 1.0, ModelTier::Standard, 0.1).expect("new");
+        let r = agent.reserve(0.75).expect("fits");
+        assert!((agent.reserved_usd() - 0.75).abs() < 1e-12);
+        assert_eq!(agent.spent_usd(), 0.0);
+        assert!(agent.reserve(0.5).is_err(), "only 0.25 is left");
+        drop(r);
+        assert_eq!(agent.reserved_usd(), 0.0);
+        assert!((agent.remaining_usd() - 1.0).abs() < 1e-12);
+        let r = agent.reserve(0.5).expect("fits again");
+        r.release();
+        assert!((agent.remaining_usd() - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_settle_books_the_actual_cost() {
+        let agent = AgentBudget::new("a", 1.0, ModelTier::Standard, 0.1).expect("new");
+        let out = agent.reserve(0.2).expect("fits").settle(0.05);
+        assert!(!out.over_cap);
+        assert!((agent.spent_usd() - 0.05).abs() < 1e-12);
+        assert_eq!(agent.reserved_usd(), 0.0);
+        // a call that ran far over its estimate is still booked in full
+        let out = agent.reserve(0.1).expect("fits").settle(2.0);
+        assert!(out.over_cap);
+        assert!((agent.spent_usd() - 2.05).abs() < 1e-9);
+        assert!(agent.is_exhausted());
+    }
+
+    #[test]
+    fn test_reserve_refuses_bad_estimates_and_killed_budgets() {
+        let agent = AgentBudget::new("a", 1.0, ModelTier::Standard, 0.1).expect("new");
+        assert!(matches!(agent.reserve(-0.1), Err(BudgetError::InvalidConfig(_))));
+        assert!(matches!(agent.reserve(f64::NAN), Err(BudgetError::InvalidConfig(_))));
+        assert!(matches!(agent.reserve(2.0), Err(BudgetError::AgentExhausted { .. })));
+        agent.kill("x");
+        assert!(matches!(agent.reserve(0.1), Err(BudgetError::KillSwitchActivated { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_audit_log_ring_evicts_oldest() {
+        let agent = AgentBudget::builder("a", 100.0).audit_log(AuditLog::Ring(3)).build().expect("new");
+        for i in 0..5u32 {
+            agent.charge_usd_force(f64::from(i), ChargeContext::new());
+        }
+        let log = agent.audit_log().await;
+        assert_eq!(log.iter().map(|r| r.cost_usd).collect::<Vec<_>>(), vec![2.0, 3.0, 4.0]);
+        assert_eq!(agent.audit_records_dropped(), 2);
+        assert_eq!(agent.drain_audit_log().len(), 3);
+        assert!(agent.audit_log().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_audit_log_default_is_bounded_and_none_keeps_nothing() {
+        let agent = AgentBudget::new("a", 1e6, ModelTier::Local, 0.1).expect("new");
+        for _ in 0..1_500 {
+            agent.charge_usd(0.001, None, None).await.expect("ok");
+        }
+        assert_eq!(agent.audit_log().await.len(), 1024);
+        assert_eq!(agent.audit_records_dropped(), 476);
+
+        let quiet = AgentBudget::builder("q", 10.0).audit_log(AuditLog::None).build().expect("new");
+        quiet.charge_usd(1.0, None, None).await.expect("ok");
+        assert!(quiet.audit_log().await.is_empty());
+        assert!((quiet.spent_usd() - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_builder_validates() {
+        assert!(AgentBudget::builder("a", 0.0).build().is_err());
+        assert!(AgentBudget::builder("a", 1.0).cascade_threshold(1.5).build().is_err());
+    }
+
+    #[test]
+    fn test_reservation_is_send_and_sync() {
+        fn check<T: Send + Sync + 'static>() {}
+        check::<Reservation>();
+        check::<ChargeOutcome>();
     }
 }

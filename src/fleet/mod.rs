@@ -1,6 +1,6 @@
 //! Fleet-wide budget allocation and reallocation across agent cohorts.
 
-use crate::budget::{nanos_to_usd, usd_to_nanos, AgentBudget, BudgetSnapshot, ChargeReceipt};
+use crate::budget::{nanos_to_usd, usd_to_nanos, AgentBudget, AuditLog, BudgetSnapshot, ChargeReceipt};
 use crate::error::BudgetError;
 use crate::model::ModelTier;
 use dashmap::DashMap;
@@ -92,6 +92,7 @@ pub struct FleetAllocator {
     agents: DashMap<String, Arc<AgentBudget>>,
     default_tier: ModelTier,
     default_cascade_threshold: f64,
+    audit_log: AuditLog,
 }
 
 impl FleetAllocator {
@@ -110,7 +111,15 @@ impl FleetAllocator {
             agents: DashMap::new(),
             default_tier,
             default_cascade_threshold,
+            audit_log: AuditLog::default(),
         })
+    }
+
+    /// How much of the audit log each agent registered from now on keeps in
+    /// memory (default `Ring(1024)` per agent; see [`AuditLog`]).
+    pub fn with_audit_log(mut self, mode: AuditLog) -> Self {
+        self.audit_log = mode;
+        self
     }
 
     /// Register a new agent with the given per-agent limit.
@@ -120,12 +129,11 @@ impl FleetAllocator {
     /// [`BudgetError::InvalidConfig`] if the id is already registered or the limit is invalid.
     pub fn register_agent(&self, agent_id: &str, limit_usd: f64) -> Result<(), BudgetError> {
         use dashmap::mapref::entry::Entry;
-        let budget = AgentBudget::new(
-            agent_id,
-            limit_usd,
-            self.default_tier,
-            self.default_cascade_threshold,
-        )?;
+        let budget = AgentBudget::builder(agent_id, limit_usd)
+            .tier(self.default_tier)
+            .cascade_threshold(self.default_cascade_threshold)
+            .audit_log(self.audit_log)
+            .build()?;
         match self.agents.entry(agent_id.to_string()) {
             Entry::Occupied(_) => Err(BudgetError::InvalidConfig(format!(
                 "agent '{agent_id}' is already registered"

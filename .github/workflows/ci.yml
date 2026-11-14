@@ -22,3 +22,24 @@ jobs:
         run: cargo test --all-features
       - name: Clippy
         run: cargo clippy --all-features -- -D warnings
+      - name: Docs
+        run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - name: rig example
+        run: cargo run --example rig_budget_hook --features __rig-test-utils
+
+  # The oldest Rust this crate promises (rust-version in Cargo.toml). Every
+  # feature except `rig`, which needs Rust 1.95+ (rig-agent's own minimum).
+  msrv:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: fallback
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85
+      - uses: Swatinem/rust-cache@v2
+      - name: Test
+        run: cargo test
+      - name: Test (all features but rig)
+        run: cargo test --features tokens,ratelimit,tracing,metrics,schemars,async-openai

@@ -1,9 +1,36 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 (unreleased)
+
+Settlement correctness, a bounded audit log, and the rig hook for rig-agent 0.44 to 0.46. Pre-1.0 minor bump because two defaults change behaviour (see Changed).
+
+### Fixed
+- Spend that had already happened could be thrown away. `charge_usd`, `charge_usage` and the rig hook book a call *after* the provider has answered, and when that charge would cross the cap it was refused and nothing was recorded, so `spent_usd` and the audit log came out lower than the provider's bill exactly when the cap was hit. Post-call settlement now always books (see Added), and the rig hook uses it.
+- The audit log grew without bound: one record per charge, forever, and `audit_log()` cloned all of it. It is now a ring of the last 1,024 records by default.
 
 ### Added
-- Feature `rig`: `rig::BudgetHook`, an `AgentHook` for rig-agent 0.44. It charges each model turn to an `AgentBudget` (the provider's reported cost when rig has one, otherwise the price table with cache discounts), stops the run when a turn would cross the cap, trips the kill switch so other runs sharing the budget stop before their first call (`keep_alive_on_refusal` turns that off), and refuses to start a run on a spent or killed budget. Also `From<&rig_agent::core::completion::Usage> for Usage`. Needs Rust 1.95 (rig's MSRV); the rest of the crate stays on 1.85.
+- `AgentBudget::reserve(estimate_usd) -> Result<Reservation, BudgetError>`: holds headroom with a compare-and-swap before a call, so concurrent agents cannot all be admitted on the last dollar. `Reservation::settle(actual_usd)` / `settle_with(actual_usd, ChargeContext)` release the hold and book the real cost, even past the cap; dropping a `Reservation` (or `release()`) frees the hold and books nothing.
+- `AgentBudget::charge_usd_force(cost_usd, ChargeContext) -> ChargeOutcome`: books spend that already happened, ignoring the cap and the kill switch, and logs it. `ChargeOutcome { recorded_usd, total_spent_usd, over_cap, downgraded_to }` says whether to stop. Also `BudgetEnvelope::charge_force` and `AtomicBudget::charge_force`.
+- `ChargeContext` (task, session, model, token counts) for the audit record of a settlement.
+- `AuditLog::{None, Ring(n), Unbounded}`, set with `AgentBudget::builder(..).audit_log(..)`, `BudgetEnvelope::with_audit_log` or `FleetAllocator::with_audit_log`. `drain_audit_log()` takes the records out (to ship them to your own storage) and `audit_records_dropped()` counts evicted ones.
+- `AgentBudget::builder(agent_id, limit_usd)` with `tier` (default Standard), `cascade_threshold` (default 0.2) and `audit_log` (default `Ring(1024)`).
+- `reserved_usd()` on `AtomicBudget`, `BudgetEnvelope` and `AgentBudget`; `AgentBudget::is_exhausted()`.
+- Feature `rig`: `rig::BudgetHook`, an `AgentHook` for rig-agent 0.44 to 0.46 (the dependency is now `>=0.44, <0.47`; tested against 0.46). Before each model call it reserves the estimated prompt cost (about four characters per token, priced from the `PriceTable`, plus `reserve_output_tokens(n)` if set) and stops the run if that does not fit; after each turn it settles the reservation with the real cost (the provider's reported cost when rig has one, otherwise the usage priced with cache discounts) and only then stops the run if the budget is over its cap, tripping the kill switch so other runs sharing the budget stop before their next call (`keep_alive_on_refusal` turns that off). Also `From<&rig_agent::completion::Usage> for Usage`. Needs Rust 1.95 with rig-agent 0.44 and 1.97.1 with 0.46; the rest of the crate stays on 1.85. The module docs explain how this differs from rig's own `examples/run_budget.rs` (dollars across models, runs and agents, versus token and tool-call counts for one run).
+- `examples/rig_budget_hook.rs`: two agents sharing a dollar cap, offline against rig's mock model.
+- Property tests: the audit log sums to `spent_usd` under any mix of refused, forced, reserved-and-settled and reserved-and-dropped charges; 64 threads reserving and settling never overshoot the cap by more than the settle deltas, and never at all when no call costs more than its reservation.
+- Crate docs: an authorize-then-settle guide in the `budget` module and a short map of the API at the end of the crate root.
+
+### Changed
+- `AgentBudget::new`, `BudgetEnvelope::new` and fleet agents keep the last 1,024 audit records instead of all of them. Use `AuditLog::Unbounded` for the old behaviour.
+- `remaining_usd()`, `is_exhausted()` and `utilization()` count in-flight reservations as used. `spent_usd()` counts settled spend only. Without reservations nothing changes.
+- `utilization()` can exceed 1.0 after a forced charge.
+- The cascade and the audit log use `std::sync::Mutex` instead of tokio locks (no critical section is held across an `.await`). The async signatures are unchanged.
+- CI (GitHub and GitLab) now runs `cargo test` on 1.85, plus rustdoc with `-D warnings` and the rig example on stable.
+- `cargo test` builds on the MSRV (1.85) again: the rig mock-model tests moved to `tests/rig_hook.rs` behind the internal `__rig-test-utils` feature, and rig-agent is no longer an unconditional dev-dependency.
+
+## 0.2.2 (2026-10-22)
+
+- README only. The source code, examples, benches and CHANGELOG in the published crate are identical to 0.2.1. This version was published from a working tree, so the `.crate` carries no VCS info and there is no tag; its README differs from every committed version. The repository's `Cargo.toml` was not bumped at the time (it still said 0.2.1 until 0.3.0).
 
 ## 0.2.1 (2026-10-17)
 
