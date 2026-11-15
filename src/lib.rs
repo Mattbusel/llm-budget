@@ -24,6 +24,10 @@
 //!   rig's own token-count budget example in its module docs.
 //! - **genai** (feature `genai`): `genai::exec_chat` and
 //!   `genai::exec_chat_stream` run a genai `Client` call under a hold.
+//! - **metrics** (feature `metrics-layer`): `metrics_layer::CostLayer` wraps
+//!   any metrics recorder and prices token counters a framework already emits
+//!   (swiftide's preset, or any counter labelled with the model) into a USD
+//!   metric, and can book them on an [`AgentBudget`].
 //! - **async-openai** (feature `async-openai`): `openai::settle_response` and
 //!   `openai::StreamUsage` settle from a chat completion or a stream's final
 //!   usage chunk.
@@ -41,6 +45,9 @@
 pub mod budget;
 pub mod error;
 pub mod fleet;
+#[cfg(feature = "metrics-layer")]
+#[cfg_attr(docsrs, doc(cfg(feature = "metrics-layer")))]
+pub mod metrics_layer;
 pub mod model;
 pub mod observe;
 #[cfg(feature = "async-openai")]

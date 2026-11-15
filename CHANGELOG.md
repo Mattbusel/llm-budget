@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.5.1] - 2026-11-15
+
+Price the token counters a framework already emits through the metrics facade. A new `metrics-layer` feature adds `metrics_layer::CostLayer`, the metrics twin of 0.5.0's tracing layer, with a preset for swiftide.
+
+### Added
+- Feature `metrics-layer`, module `metrics_layer`:
+  - `CostLayer`, a `metrics_util::layers::Layer`: wrap any recorder (Prometheus, StatsD, OpenTelemetry, a test recorder) and every increment of a configured token counter is priced and added to a cost gauge with the counter's labels (USD; a gauge because metrics counters hold whole numbers, and it is only ever incremented). The original counters pass through unchanged. Tokens on a model no source can price go to `llm_budget_unpriced_tokens_total` instead, never guessed.
+  - `CostLayer::swiftide()`: preset for swiftide's `swiftide.usage.prompt_tokens` / `swiftide.usage.completion_tokens` (label `model`), recording `swiftide.usage.cost_usd`. `input_tokens`, `output_tokens`, `model_label` and `cost_metric` for any other emitter; `price_table` for your own prices.
+  - `CostLayer::budget(Arc<AgentBudget>)` books every priced increment (even past the cap, since it was paid for) and, once over the cap, trips the kill switch so `reserve_for` and `charge_*` refuse the next call. `kill_on_cap(false)` books without killing.
+- `examples/metrics_cost.rs`: swiftide-style counters priced and capped, offline. CI runs it.
+
 ## [0.5.0] - 2026-11-15
 
 Price LLM calls from their traces. A new `tracing-layer` feature adds `CostLayer`, a tracing-subscriber layer that turns the OpenTelemetry GenAI usage fields rig (and other instrumentations) already record into dollar costs, with an optional cap. Prices come from llm-prices 1.3.

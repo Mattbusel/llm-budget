@@ -1,6 +1,6 @@
 [package]
 name = "llm-budget"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 rust-version = "1.85"
 description = "Hard USD spend limits for LLM agents: per-agent and fleet caps, real per-model prices, kill switch, automatic model downgrade"
@@ -36,6 +36,9 @@ tracing = ["dep:tracing"]
 tracing-layer = ["dep:tracing", "dep:tracing-subscriber"]
 ## Export spend and refusal counters through the metrics facade (Prometheus, StatsD, ...).
 metrics = ["dep:metrics"]
+## `metrics_layer::CostLayer`: a metrics-util layer that prices token counters
+## (swiftide's, or any model-labelled ones) into a USD metric and an optional budget.
+metrics-layer = ["metrics", "dep:metrics-util"]
 ## JSON Schema for the serialized types (schemars).
 schemars = ["dep:schemars"]
 ## `openai` module and `From<&CompletionUsage>` for async-openai users: settle
@@ -71,6 +74,8 @@ tracing = { version = "0.1", default-features = false, features = ["std"], optio
 metrics = { version = "0.24", default-features = false, optional = true }
 # CostLayer (feature "tracing-layer")
 tracing-subscriber = { version = "0.3.18", default-features = false, features = ["registry", "std"], optional = true }
+# CostLayer for metrics (feature "metrics-layer")
+metrics-util = { version = "0.20", default-features = false, optional = true }
 # JSON Schema (feature "schemars")
 schemars = { version = "1", optional = true }
 # async-openai interop (feature "async-openai"), types only
@@ -132,6 +137,11 @@ required-features = ["genai"]
 
 [[example]]
 name = "provider_usage"
+
+# Offline: prints the cost of swiftide-style token counters. cargo run --example metrics_cost --features metrics-layer
+[[example]]
+name = "metrics_cost"
+required-features = ["metrics-layer"]
 
 [[example]]
 name = "rate_limit"

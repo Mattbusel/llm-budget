@@ -35,6 +35,7 @@ jobs:
       - name: Integration examples
         run: |
           cargo run --example record_usage --no-default-features
+          cargo run --example metrics_cost --features metrics-layer
           cargo run --example async_openai_budget --features async-openai
           cargo run --example genai_budget --features genai
 
@@ -52,4 +53,4 @@ jobs:
       - name: Test
         run: cargo test
       - name: Test (all features but rig)
-        run: cargo test --features tokens,ratelimit,tracing,tracing-layer,metrics,schemars,async-openai
+        run: cargo test --features tokens,ratelimit,tracing,tracing-layer,metrics,metrics-layer,schemars,async-openai
