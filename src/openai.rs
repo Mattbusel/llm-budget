@@ -221,13 +221,15 @@ mod tests {
         let hold = reserve_request(&budget, &r).unwrap();
         assert!(budget.reserved_usd() > 0.0);
         let resp: CreateChatCompletionResponse = serde_json::from_str(
-            r#"{"id":"x","object":"chat.completion","created":1,"model":"gpt-4o-2099-01-01","choices":[],
+            r#"{"id":"x","object":"chat.completion","created":1,"model":"acme-router-v1","choices":[],
                 "usage":{"prompt_tokens":2006,"completion_tokens":300,"total_tokens":2306,
                          "prompt_tokens_details":{"cached_tokens":1920}}}"#,
         )
         .unwrap();
         let out = settle_response(hold, &resp);
-        // the dated id is unknown, so the reserved model (gpt-4o) prices it
+        // the echoed id has no price, so the reserved model (gpt-4o) prices it
+        // (a dated snapshot such as gpt-4o-2099-01-01 now resolves through
+        // llm-prices 1.3 and is priced as itself)
         let expected = PriceTable::builtin()
             .cost_usage("gpt-4o", &Usage::new(2006, 300).with_cache_read(1920))
             .unwrap();

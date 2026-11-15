@@ -19,7 +19,7 @@ cargo add llm-budget
 cargo add tokio --features macros,rt-multi-thread
 ```
 
-Optional features: `tokens`, `ratelimit`, `tracing`, `metrics`, `schemars`, `async-openai`, `rig`. Table below.
+Optional features: `tokens`, `ratelimit`, `tracing`, `tracing-layer`, `metrics`, `schemars`, `async-openai`, `rig`. Table below.
 
 ## In ten lines
 
@@ -111,6 +111,16 @@ It makes no HTTP calls, so it works next to any client:
 - **Any client or framework**: reserve before the call with `AgentBudget::reserve_for(model, &estimate)`, then `Reservation::settle_usage(model, &usage)` with what the provider reported. Build the `Usage` with `Usage::from_parts(uncached, cache_read, cache_write, output)`, or pass the raw response body to `Usage::from_json` (OpenAI, Anthropic and Gemini formats). `AgentBudget::record(model, &usage)` books a finished call that had no reservation. See `examples/record_usage.rs` and `examples/provider_usage.rs`.
 - **genai** (feature `genai`): `llm_budget::genai::exec_chat(&client, &budget, model, request, options)` reserves, calls and settles in one step; `exec_chat_stream` plus `settle_stream_end` do the same for streams. See `examples/genai_budget.rs`.
 - **async-openai** (feature `async-openai`): `openai::reserve_request` before `client.chat().create(..)`, `openai::settle_response` after it. For streams, `openai::include_usage` on the request and `openai::StreamUsage` over the chunks. See `examples/async_openai_budget.rs`.
+- **tracing / OpenTelemetry GenAI spans** (feature `tracing-layer`): add `tracing_layer::CostLayer` to your subscriber and every span that carries `gen_ai.usage.*` fields (rig records them on each model call) is priced with llm-prices when it closes. The layer emits `gen_ai.usage.cost` inside the span, keeps running totals, and with `.budget(budget)` books the spend and kills the budget once it is over the cap. The traced code does not change. Add it before a `tracing-opentelemetry` layer and the cost is exported with the span:
+  ```rust
+  use tracing_subscriber::prelude::*;
+  let cost = llm_budget::tracing_layer::CostLayer::new().budget(budget.clone());
+  let totals = cost.tracker();
+  tracing_subscriber::registry().with(cost).with(otel_layer).init();
+  // ... run any rig agent ...
+  println!("spent ${:.4}", totals.total_usd());
+  ```
+  See `examples/rig_tracing_cost.rs`.
 - **governor**: `ratelimit` uses it for tokens-per-minute limits.
 - **tracing / metrics**: same-named features give events and Prometheus-style counters for every decision.
 - **LiteLLM**: the price table is LiteLLM's. `PriceTable::from_litellm_json` reads the same file.
@@ -124,6 +134,7 @@ It makes no HTTP calls, so it works next to any client:
 | `tokens` | no | `tokens::count_tokens`, `cost_of_text`, `AgentBudget::charge_model_text`: token counts from text with OpenAI's tokenizers | [tiktoken-rs](https://crates.io/crates/tiktoken-rs) |
 | `ratelimit` | no | `ratelimit::TokenRateLimiter`: tokens-per-minute and requests-per-minute limits with a retry-after time | [governor](https://crates.io/crates/governor) |
 | `tracing` | no | A `tracing` event for every accepted or refused charge, downgrade and kill | [tracing](https://crates.io/crates/tracing) |
+| `tracing-layer` | no | `tracing_layer::CostLayer`: prices spans with OpenTelemetry GenAI usage fields (rig, other GenAI instrumentations), emits `gen_ai.usage.cost`, optional capped budget | [tracing](https://crates.io/crates/tracing), [tracing-subscriber](https://crates.io/crates/tracing-subscriber) (`registry` only) |
 | `metrics` | no | `llm_budget_charges_total`, `llm_budget_spent_usd`, `llm_budget_remaining_usd`, `llm_budget_downgrades_total` through the metrics facade (Prometheus and other exporters) | [metrics](https://crates.io/crates/metrics) |
 | `async-openai` | no | `openai` module: reserve from a `CreateChatCompletionRequest`, settle from a `CreateChatCompletionResponse` or a stream's final usage chunk; `From<&CompletionUsage> for Usage` | [async-openai](https://crates.io/crates/async-openai) types only (no HTTP client) |
 | `genai` | no | `genai` module: `exec_chat` and `exec_chat_stream` run a genai `Client` call under a reserve/settle hold; `From<&genai Usage> for Usage` | [genai](https://crates.io/crates/genai) |
@@ -141,6 +152,7 @@ It makes no HTTP calls, so it works next to any client:
 | `rate_limit` | a TPM limit and a dollar cap together, with tracing output | `cargo run --example rate_limit --features ratelimit,tracing` |
 | `record_usage` | reserve, settle with reported usage, record, your own prices; no async runtime | `cargo run --example record_usage --no-default-features` |
 | `async_openai_budget` | async-openai requests and streams under a cap (offline, canned responses) | `cargo run --example async_openai_budget --features async-openai` |
+| `rig_tracing_cost` | a plain rig agent priced from its traces by `CostLayer`, with a cap (offline, mock model) | `cargo run --example rig_tracing_cost --features tracing-layer,__rig-test-utils` |
 | `genai_budget` | a genai agent loop and a stream under a cap (needs an API key) | `cargo run --example genai_budget --features genai` |
 
 ## What you get

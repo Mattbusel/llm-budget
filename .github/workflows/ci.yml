@@ -26,8 +26,10 @@ jobs:
         run: cargo doc --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings
-      - name: rig example
-        run: cargo run --example rig_budget_hook --features __rig-test-utils
+      - name: rig examples
+        run: |
+          cargo run --example rig_budget_hook --features __rig-test-utils
+          cargo run --example rig_tracing_cost --features tracing-layer,__rig-test-utils
       - name: No default features (no async runtime)
         run: cargo test --no-default-features
       - name: Integration examples
@@ -50,4 +52,4 @@ jobs:
       - name: Test
         run: cargo test
       - name: Test (all features but rig)
-        run: cargo test --features tokens,ratelimit,tracing,metrics,schemars,async-openai
+        run: cargo test --features tokens,ratelimit,tracing,tracing-layer,metrics,schemars,async-openai

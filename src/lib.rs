@@ -27,6 +27,10 @@
 //! - **async-openai** (feature `async-openai`): `openai::settle_response` and
 //!   `openai::StreamUsage` settle from a chat completion or a stream's final
 //!   usage chunk.
+//! - **Traced apps** (feature `tracing-layer`): `tracing_layer::CostLayer`
+//!   prices every span that carries OpenTelemetry GenAI usage fields (rig
+//!   records them on each model call), emits `gen_ai.usage.cost` and can
+//!   book the spend on a capped budget, with no change to the traced code.
 //! - **No async runtime required**: everything except `BudgetStore`
 //!   (feature `store`, on by default) is runtime-free; the `async` charge
 //!   methods never await anything runtime-specific. Turn default features off
@@ -58,6 +62,9 @@ pub mod rig;
 #[cfg(feature = "tokens")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tokens")))]
 pub mod tokens;
+#[cfg(feature = "tracing-layer")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tracing-layer")))]
+pub mod tracing_layer;
 pub mod usage;
 
 pub use budget::{

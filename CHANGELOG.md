@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.5.0] - 2026-11-15
+
+Price LLM calls from their traces. A new `tracing-layer` feature adds `CostLayer`, a tracing-subscriber layer that turns the OpenTelemetry GenAI usage fields rig (and other instrumentations) already record into dollar costs, with an optional cap. Prices come from llm-prices 1.3.
+
+### Added
+- Feature `tracing-layer`, module `tracing_layer`:
+  - `CostLayer`: watches spans that declare `gen_ai.usage.input_tokens` / `gen_ai.usage.output_tokens` (or the older `prompt_tokens` / `completion_tokens`). When one closes it prices the call (model from `gen_ai.response.model`, then `gen_ai.request.model`; cache reads and writes from `gen_ai.usage.cache_read.input_tokens` and `gen_ai.usage.cache_creation.input_tokens`) and emits an `INFO` event on target `llm_budget::cost`, inside the span, with `gen_ai.usage.cost` in USD next to the model and token counts. A span that records its own `gen_ai.usage.cost` keeps that figure. A span whose descendants were already priced (rig's `invoke_agent` sum over its chat turns) is not counted again. Models no source can price are counted, never guessed.
+  - `CostLayer::budget(Arc<AgentBudget>)`: books every priced call (even past the cap, since it was paid for) and, once spend is over the cap, kills the budget and emits a `WARN` event, so `reserve_for`, `charge_*` and `rig::BudgetHook` on that budget refuse the next call. `kill_on_cap(false)` books without killing.
+  - `CostLayer::price_table`, `emit_events`, `on_cost(|&SpanCost| ..)`, and `CostTracker` (`total_usd`, `priced_calls`, `unpriced_calls`, `over_cap`) from `CostLayer::tracker()`.
+- `examples/rig_tracing_cost.rs`: a plain rig agent (no hook) priced from its spans, with a cap, offline against rig's mock model. CI runs it.
+- `tests/tracing_layer.rs`: rig-shaped chat spans, cache-read pricing, no double count of the agent sum, unknown models, custom tables, reported costs, older field names, budget booking and the kill at the cap.
+
+### Changed
+- llm-prices requirement raised from 1.1 to 1.3 (Mistral, xAI and more providers, dated-snapshot and provider-prefixed id resolution). Dated ids such as `gpt-4o-2099-01-01` now resolve to their base model's price instead of falling back to the reserved model; two tests that relied on the old miss now use an id no source lists.
+- MSRV job also tests `tracing-layer` on Rust 1.85.
+
 ## [0.4.0] - 2026-11-14
 
 Report spend from any client or framework, integrations for genai and async-openai, prices from the llm-prices crate, and a core with no async runtime. Pre-1.0 minor bump: the API is additive, but tokio moved behind a default feature and some built-in prices changed (see Changed).

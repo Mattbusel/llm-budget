@@ -299,14 +299,16 @@ impl PriceTable {
     }
 
     /// Only the [`llm-prices`](https://docs.rs/llm-prices) rows (Anthropic,
-    /// OpenAI, Google Gemini, DeepSeek), without the LiteLLM snapshot.
+    /// OpenAI, Google Gemini, DeepSeek and the other providers it lists),
+    /// without the LiteLLM snapshot.
     ///
     /// ```
     /// let t = llm_budget::PriceTable::from_llm_prices();
     /// assert!(t.get("claude-sonnet-4-6").is_some());
     /// // Bedrock ids resolve through llm-prices' own lookup.
     /// assert!(t.get("us.anthropic.claude-sonnet-4-6-v1:0").is_some());
-    /// assert!(t.get("mistral-large-latest").is_none());
+    /// // Models llm-prices does not list are not in this table.
+    /// assert!(t.get("in-house-7b").is_none());
     /// ```
     pub fn from_llm_prices() -> Self {
         let mut prices = HashMap::new();

@@ -72,10 +72,12 @@ fn reserve_for_then_settle_usage() {
 #[test]
 fn settle_usage_falls_back_to_reserved_model_then_estimate() {
     let agent = AgentBudget::builder("a", 1.0).build().unwrap();
-    // The provider echoes an id the table does not know: priced as the reserved model.
+    // The provider echoes an id no source can price: priced as the reserved
+    // model. (Dated snapshots like gpt-4o-mini-2099-12-31 resolve through
+    // llm-prices 1.3, so this uses a proxy route name.)
     let hold = agent.reserve_for("gpt-4o-mini", &Usage::new(1_000, 1_000)).unwrap();
     let u = Usage::new(1_000_000, 0);
-    let out = hold.settle_usage("gpt-4o-mini-2099-12-31", &u);
+    let out = hold.settle_usage("acme-router-v1", &u);
     assert!((out.recorded_usd - 0.15).abs() < 1e-9);
     assert_eq!(agent.drain_audit_log()[0].model.as_deref(), Some("gpt-4o-mini"));
 
