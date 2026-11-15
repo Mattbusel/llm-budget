@@ -28,9 +28,17 @@ jobs:
           RUSTDOCFLAGS: -D warnings
       - name: rig example
         run: cargo run --example rig_budget_hook --features __rig-test-utils
+      - name: No default features (no async runtime)
+        run: cargo test --no-default-features
+      - name: Integration examples
+        run: |
+          cargo run --example record_usage --no-default-features
+          cargo run --example async_openai_budget --features async-openai
+          cargo run --example genai_budget --features genai
 
   # The oldest Rust this crate promises (rust-version in Cargo.toml). Every
-  # feature except `rig`, which needs Rust 1.95+ (rig-agent's own minimum).
+  # feature except `rig`, which needs Rust 1.95+ (rig-agent's own minimum), and
+  # `genai`, which follows genai's own minimum Rust.
   msrv:
     runs-on: ubuntu-latest
     env:

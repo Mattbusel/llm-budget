@@ -1,12 +1,16 @@
 //! Extended test coverage: error variants, model cascade edge cases,
 //! atomic budget concurrency, fleet exhaustion, persistence edge cases.
 
-use llm_budget::budget::{AgentBudget, AtomicBudget, BudgetEnvelope, BudgetSnapshot, ScopeKind};
+use llm_budget::budget::{AgentBudget, AtomicBudget, BudgetEnvelope, ScopeKind};
+#[cfg(feature = "store")]
+use llm_budget::budget::BudgetSnapshot;
 use llm_budget::error::BudgetError;
 use llm_budget::fleet::FleetBudget;
 use llm_budget::model::{ModelCascade, ModelTier};
+#[cfg(feature = "store")]
 use llm_budget::persistence::BudgetStore;
 use std::sync::Arc;
+#[cfg(feature = "store")]
 use tempfile::TempDir;
 
 // ── Error display coverage ───────────────────────────────────────────────────
@@ -311,6 +315,7 @@ async fn test_agent_budget_snapshot_utilization_between_0_and_1() {
 
 // ── Persistence: overwrite and cache eviction ────────────────────────────────
 
+#[cfg(feature = "store")]
 #[tokio::test]
 async fn test_persistence_overwrite_reads_latest_from_disk() {
     let dir = TempDir::new().unwrap();
@@ -334,6 +339,7 @@ async fn test_persistence_overwrite_reads_latest_from_disk() {
     assert!((loaded.snapshots[0].spent_usd - 5.0).abs() < 1e-6);
 }
 
+#[cfg(feature = "store")]
 #[tokio::test]
 async fn test_persistence_load_nonexistent_is_error() {
     let dir = TempDir::new().unwrap();

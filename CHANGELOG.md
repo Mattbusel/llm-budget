@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.4.0] - 2026-11-14
+
+Report spend from any client or framework, integrations for genai and async-openai, prices from the llm-prices crate, and a core with no async runtime. Pre-1.0 minor bump: the API is additive, but tokio moved behind a default feature and some built-in prices changed (see Changed).
+
+### Added
+- Framework-agnostic reporting, the core pattern for any client:
+  - `AgentBudget::reserve_for(model, &estimate)` holds the estimated cost of a call (priced from the agent's table) and refuses when it does not fit, so the call is never made.
+  - `Reservation::settle_usage(model, &usage)` / `settle_usage_with(.., ChargeContext)` book what the provider reported. If `model` has no price (a dated id echoed back) the reserved model is tried, then the reserved estimate is booked. Never fails; books past the cap and sets `over_cap`. `Reservation::model()`.
+  - `AgentBudget::record(model, &usage)` / `record_with(.., ChargeContext)` book a finished call that had no reservation, even past the cap. `UnknownModel` books nothing.
+  - `AgentBudget::cost_of(model, &usage)` prices a call without booking it.
+  - `Usage::from_parts(uncached_input, cache_read, cache_write, output)`, `with_cache_read`, `with_cache_write`, `total_tokens`, `is_empty`, and `Add`, `AddAssign` and `Sum` for totalling turns. `usage::estimate_tokens(text)` and `usage::estimate_json_tokens(&value)` for sizing a reservation.
+  - `ChargeContext::usage(&usage)` fills the token counts.
+- Feature `genai`: `llm_budget::genai::exec_chat(&client, &budget, model, request, options)` reserves (prompt estimated from the `ChatRequest`, output from `max_tokens`), calls genai and settles with genai's normalised usage; a genai error releases the hold (`genai::Error::{Budget, Genai}`). `exec_chat_stream` turns on `capture_usage` and returns the stream with its reservation; `settle_stream_end` settles from the `End` event. Also `settle_response`, `estimate_request` and `From<&genai::chat::Usage> for Usage` (cache reads and writes, including per-TTL writes). A genai `namespace::` prefix is ignored for pricing.
+- Feature `async-openai`, new `openai` module: `reserve_request(&budget, &CreateChatCompletionRequest)`, `settle_response(reservation, &CreateChatCompletionResponse)`, `record_response`, `estimate_request`, `include_usage(&mut request)` (sets `stream_options.include_usage`) and `StreamUsage`, which collects the final usage chunk of a stream and settles with it (or with the estimate when the stream ended without one).
+- Prices from the [llm-prices](https://crates.io/crates/llm-prices) crate (1.1, no dependencies): dated, source-cited prices for Anthropic, OpenAI, Gemini and DeepSeek now win over the LiteLLM snapshot for every model they list, and its id lookup resolves Bedrock and Vertex ids (`us.anthropic.claude-sonnet-4-6-v1:0`, `claude-opus-4-1@20250805`). The LiteLLM snapshot stays for the other providers (Mistral, xAI, older ids) and for context sizes. `pricing::LLM_PRICES_DATE`.
+- `PriceTable::cost_usage(model, &usage)` and `PriceTable::cost(model, in, out)`: price through the lookup order hook, inserted prices, llm-prices (with long-context tiers: a 300k-token prompt on gpt-5.4 bills at $5/M, not $2.50/M), then the table's rows. OpenAI rows that only list 30m/12h cache-write prices are priced at the shortest lifetime.
+- Override hooks: `PriceTable::with_hook(|model, usage| Option<f64>)` (consulted first), `with_price`, `with_llm_prices(bool)`, `from_llm_prices()`, `contains(model)`; `ModelPrice::new(..)` and `with_cache(..)`; `AgentBudgetBuilder::price_table(table)` gives an agent (or, through an `Arc`, several) its own table, used by `charge_model`, `charge_usage`, `record`, `reserve_for` and `settle_usage`; `AgentBudget::price_table()`.
+- Feature `store` (default): `BudgetStore` and `persistence`. Everything else needs no async runtime; `cargo test --no-default-features` builds without tokio.
+- Examples: `record_usage` (the core pattern with your own prices, plain `fn main`, no runtime), `async_openai_budget` (requests and streams, offline), `genai_budget` (an agent loop and a stream; needs an API key).
+- Tests: `tests/record_usage.rs`; `tests/genai_mock.rs` runs a real genai `Client` over HTTP against a local mock server (reported usage booked, refused call never sent, provider error releases the hold, unknown model); unit tests for the openai module, genai usage mapping, llm-prices layering, long-context and 30m cache-write pricing, overrides and hooks.
+- CI runs the new examples and `cargo test --no-default-features`.
+
+### Changed
+- tokio is optional (feature `store`, on by default). With `default-features = false`, `BudgetStore` and `persistence` are gone; add `features = ["store"]` to keep them.
+- Built-in prices: where llm-prices lists a model, its numbers replace the LiteLLM snapshot's (for example `claude-sonnet-5-5` cache reads $0.10/M instead of $0.20/M), and a row's provider and context size stay LiteLLM's. `PriceTable::len()` is larger (llm-prices rows and aliases the snapshot lacked).
+- `PriceTable::get` also resolves ids through llm-prices on the built-in table. `PriceTable` implements `Debug` by hand (counts, not every row).
+- `charge_model` and `charge_usage` price from the agent's table (the built-in one by default) through `PriceTable::cost_usage`, so they pick up long-context tiers. The rig hook does too.
+- `PriceTable::insert` marks the model as overridden, so the inserted price wins over llm-prices.
+
 ## [0.3.1] - 2026-11-14
 
 ### Fixed

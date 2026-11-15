@@ -237,16 +237,13 @@ impl BudgetHook {
     /// from the table estimates $0 (the turn's reported cost is booked later).
     fn estimate_usd<M: Borrow<Message>>(&self, prompt: &Message, history: &[M]) -> f64 {
         let tokens = estimate_prompt_tokens(prompt, history);
-        self.table()
-            .get(&self.model)
-            .map(|p| p.cost(tokens, self.output_reserve_tokens))
-            .unwrap_or(0.0)
+        self.table().cost(&self.model, tokens, self.output_reserve_tokens).unwrap_or(0.0)
     }
 
     fn turn_cost(&self, usage: &rig_agent::completion::Usage) -> Result<f64, BudgetError> {
         match usage.cost.as_ref().map(|c| c.total) {
             Some(total) if total.is_finite() && total >= 0.0 => Ok(total),
-            _ => Ok(self.table().require(&self.model)?.cost_usage(&Usage::from(usage))),
+            _ => self.table().cost_usage(&self.model, &Usage::from(usage)),
         }
     }
 
@@ -264,20 +261,9 @@ impl BudgetHook {
 /// message. Long unbroken strings (base64 images or files) and raw byte
 /// arrays count as 1,000 tokens each, roughly what providers bill for an image.
 fn estimate_prompt_tokens<M: Borrow<Message>>(prompt: &Message, history: &[M]) -> u64 {
-    fn walk(v: &serde_json::Value) -> u64 {
-        use serde_json::Value;
-        match v {
-            Value::String(s) if s.len() > 4096 && !s.contains(' ') => 1_000,
-            Value::String(s) => (s.len() as u64).div_ceil(4),
-            Value::Array(a) if a.len() > 256 && a.iter().all(Value::is_number) => 1_000,
-            Value::Array(a) => a.iter().map(walk).sum(),
-            Value::Object(o) => o.values().map(walk).sum(),
-            Value::Number(_) | Value::Bool(_) | Value::Null => 0,
-        }
-    }
     std::iter::once(prompt)
         .chain(history.iter().map(Borrow::borrow))
-        .map(|m| serde_json::to_value(m).map(|v| walk(&v)).unwrap_or(0) + 4)
+        .map(|m| serde_json::to_value(m).map(|v| crate::usage::estimate_json_tokens(&v)).unwrap_or(0) + 4)
         .sum()
 }
 

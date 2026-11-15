@@ -1,6 +1,6 @@
 [package]
 name = "llm-budget"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Hard USD spend limits for LLM agents: per-agent and fleet caps, real per-model prices, kill switch, automatic model downgrade"
@@ -20,7 +20,10 @@ panic = "deny"
 todo = "deny"
 
 [features]
-default = []
+default = ["store"]
+## `BudgetStore`: save and restore spend as JSON files (async, on tokio).
+## Without it the crate has no async runtime dependency at all.
+store = ["dep:tokio"]
 ## Count tokens from text with OpenAI's tokenizers (tiktoken-rs).
 tokens = ["dep:tiktoken-rs"]
 ## Tokens-per-minute and requests-per-minute limits (governor).
@@ -31,8 +34,13 @@ tracing = ["dep:tracing"]
 metrics = ["dep:metrics"]
 ## JSON Schema for the serialized types (schemars).
 schemars = ["dep:schemars"]
-## `From<&CompletionUsage>` for async-openai users (types only, no HTTP client).
+## `openai` module and `From<&CompletionUsage>` for async-openai users: settle
+## from a chat completion or the final usage chunk of a stream (types only, no
+## HTTP client).
 async-openai = ["dep:async-openai"]
+## `genai` module: run a genai `Client` chat call (or stream) under a
+## reserve/settle hold.
+genai = ["dep:genai"]
 ## `rig::BudgetHook`, a dollar cap for rig agents (rig-agent 0.44 to 0.46; needs
 ## Rust 1.95 for rig-agent 0.44, 1.97.1 for 0.46).
 rig = ["dep:rig-agent"]
@@ -41,8 +49,10 @@ rig = ["dep:rig-agent"]
 __rig-test-utils = ["rig", "rig-agent/test-utils"]
 
 [dependencies]
-# sync primitives for the cascade and audit log, async file I/O for BudgetStore
-tokio = { version = "1.40", features = ["sync", "fs"] }
+# async file I/O and the cache lock of BudgetStore (feature "store", default)
+tokio = { version = "1.40", features = ["sync", "fs"], optional = true }
+# dated, source-cited prices (no dependencies of its own)
+llm-prices = "1.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0"
@@ -59,12 +69,16 @@ metrics = { version = "0.24", default-features = false, optional = true }
 schemars = { version = "1", optional = true }
 # async-openai interop (feature "async-openai"), types only
 async-openai = { version = "0.42", default-features = false, features = ["chat-completion-types"], optional = true }
+# genai integration (feature "genai")
+genai = { version = "0.7", optional = true }
 # rig agent hook (feature "rig")
 rig-agent = { version = ">=0.44, <0.47", default-features = false, optional = true }
 
 [dev-dependencies]
-tokio = { version = "1.40", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "net", "io-util"] }
 tempfile = "3.9"
+# examples/genai_budget.rs reads the genai stream
+futures-util = { version = "0.3", default-features = false }
 criterion = { version = "0.5", features = ["async_tokio"] }
 proptest = "1"
 metrics-util = "0.20"
@@ -95,6 +109,20 @@ required-features = ["tokens"]
 
 [[example]]
 name = "persist_restore"
+required-features = ["store"]
+
+[[example]]
+name = "record_usage"
+
+# Runs offline: the responses are canned JSON. cargo run --example async_openai_budget --features async-openai
+[[example]]
+name = "async_openai_budget"
+required-features = ["async-openai"]
+
+# Calls a real provider when OPENAI_API_KEY (or another genai key) is set.
+[[example]]
+name = "genai_budget"
+required-features = ["genai"]
 
 [[example]]
 name = "provider_usage"
@@ -113,3 +141,8 @@ required-features = ["rig", "__rig-test-utils"]
 [[test]]
 name = "rig_hook"
 required-features = ["rig", "__rig-test-utils"]
+
+# talks HTTP to a local mock server through a real genai Client
+[[test]]
+name = "genai_mock"
+required-features = ["genai"]

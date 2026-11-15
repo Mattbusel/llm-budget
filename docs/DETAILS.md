@@ -108,7 +108,9 @@ It makes no HTTP calls, so it works next to any client:
   println!("spent ${:.4}", budget.spent_usd());
   ```
   Share one `Arc<AgentBudget>` for a common cap. `rig` needs Rust 1.95. The rest keeps MSRV 1.85.
-- **reqwest, genai, or any client**: pass the raw response body (or usage object) to `Usage::from_json`. It reads OpenAI, Anthropic and Gemini formats. See `examples/provider_usage.rs`.
+- **Any client or framework**: reserve before the call with `AgentBudget::reserve_for(model, &estimate)`, then `Reservation::settle_usage(model, &usage)` with what the provider reported. Build the `Usage` with `Usage::from_parts(uncached, cache_read, cache_write, output)`, or pass the raw response body to `Usage::from_json` (OpenAI, Anthropic and Gemini formats). `AgentBudget::record(model, &usage)` books a finished call that had no reservation. See `examples/record_usage.rs` and `examples/provider_usage.rs`.
+- **genai** (feature `genai`): `llm_budget::genai::exec_chat(&client, &budget, model, request, options)` reserves, calls and settles in one step; `exec_chat_stream` plus `settle_stream_end` do the same for streams. See `examples/genai_budget.rs`.
+- **async-openai** (feature `async-openai`): `openai::reserve_request` before `client.chat().create(..)`, `openai::settle_response` after it. For streams, `openai::include_usage` on the request and `openai::StreamUsage` over the chunks. See `examples/async_openai_budget.rs`.
 - **governor**: `ratelimit` uses it for tokens-per-minute limits.
 - **tracing / metrics**: same-named features give events and Prometheus-style counters for every decision.
 - **LiteLLM**: the price table is LiteLLM's. `PriceTable::from_litellm_json` reads the same file.
@@ -117,12 +119,14 @@ It makes no HTTP calls, so it works next to any client:
 
 | Feature | Default | What it adds | Extra dependencies |
 |---|---|---|---|
-| (none) | yes | Budgets, fleet caps, kill switch, tier cascade, price table, JSON persistence | tokio (`sync`, `fs`), serde, dashmap, thiserror |
+| (none) | | Budgets, fleet caps, kill switch, tier cascade, price table, `record` / `reserve_for` / `settle_usage`. No async runtime | serde, dashmap, thiserror, [llm-prices](https://crates.io/crates/llm-prices) |
+| `store` | yes | `BudgetStore`: JSON persistence. Turn default features off to drop tokio | tokio (`sync`, `fs`) |
 | `tokens` | no | `tokens::count_tokens`, `cost_of_text`, `AgentBudget::charge_model_text`: token counts from text with OpenAI's tokenizers | [tiktoken-rs](https://crates.io/crates/tiktoken-rs) |
 | `ratelimit` | no | `ratelimit::TokenRateLimiter`: tokens-per-minute and requests-per-minute limits with a retry-after time | [governor](https://crates.io/crates/governor) |
 | `tracing` | no | A `tracing` event for every accepted or refused charge, downgrade and kill | [tracing](https://crates.io/crates/tracing) |
 | `metrics` | no | `llm_budget_charges_total`, `llm_budget_spent_usd`, `llm_budget_remaining_usd`, `llm_budget_downgrades_total` through the metrics facade (Prometheus and other exporters) | [metrics](https://crates.io/crates/metrics) |
-| `async-openai` | no | `From<&CompletionUsage> for Usage`, so an async-openai response can be charged directly | [async-openai](https://crates.io/crates/async-openai) types only (no HTTP client) |
+| `async-openai` | no | `openai` module: reserve from a `CreateChatCompletionRequest`, settle from a `CreateChatCompletionResponse` or a stream's final usage chunk; `From<&CompletionUsage> for Usage` | [async-openai](https://crates.io/crates/async-openai) types only (no HTTP client) |
+| `genai` | no | `genai` module: `exec_chat` and `exec_chat_stream` run a genai `Client` call under a reserve/settle hold; `From<&genai Usage> for Usage` | [genai](https://crates.io/crates/genai) |
 | `rig` | no | `rig::BudgetHook`, an `AgentHook` for rig-agent 0.44 that charges every model turn and stops the run at the cap, and `From<&rig Usage> for Usage`. Needs Rust 1.95 | [rig-agent](https://crates.io/crates/rig-agent) (no default features) |
 | `schemars` | no | JSON Schema for `SpendRecord`, `BudgetSnapshot`, `ChargeReceipt` and the saved state, for non-Rust readers of those files | [schemars](https://crates.io/crates/schemars) |
 
@@ -135,12 +139,15 @@ It makes no HTTP calls, so it works next to any client:
 | `persist_restore` | saving spend at the end of a run and resuming | `cargo run --example persist_restore` |
 | `tokens` | counting tokens from text, cost of a prompt | `cargo run --example tokens --features tokens` |
 | `rate_limit` | a TPM limit and a dollar cap together, with tracing output | `cargo run --example rate_limit --features ratelimit,tracing` |
+| `record_usage` | reserve, settle with reported usage, record, your own prices; no async runtime | `cargo run --example record_usage --no-default-features` |
+| `async_openai_budget` | async-openai requests and streams under a cap (offline, canned responses) | `cargo run --example async_openai_budget --features async-openai` |
+| `genai_budget` | a genai agent loop and a stream under a cap (needs an API key) | `cargo run --example genai_budget --features genai` |
 
 ## What you get
 
 - **`AgentBudget`**: a per-agent cap. Charge from the provider's usage report (`charge_usage`, most accurate), model and token counts (`charge_model`), exact dollars (`charge_usd`), or tier estimate (`charge`). Over the cap: `BudgetError::AgentExhausted`, nothing recorded.
 - **`Usage`**: reads the `usage` block from OpenAI (Chat Completions or Responses), Anthropic or Gemini. Cached tokens are charged at the cache price, never twice.
-- **`PriceTable`**: input, output and cache prices for 232 chat models, from [LiteLLM's price list](https://github.com/BerriAI/litellm) (MIT). `pricing::SNAPSHOT_DATE` says when. Load a newer file with `PriceTable::from_litellm_json`, or add models with `insert`.
+- **`PriceTable`**: input, output and cache prices from the [llm-prices](https://crates.io/crates/llm-prices) crate (dated and source-cited, with long-context tiers, for Anthropic, OpenAI, Gemini and DeepSeek), over a snapshot of [LiteLLM's price list](https://github.com/BerriAI/litellm) (MIT) for the other providers. `pricing::LLM_PRICES_DATE` and `pricing::SNAPSHOT_DATE` say when. Override with `insert` / `with_price`, or plug in your own lookup with `with_hook`, and give an agent its table with `AgentBudget::builder(..).price_table(table)`. Load a newer LiteLLM file with `PriceTable::from_litellm_json`.
 - **`FleetAllocator`**: registers agents under a fleet total and refuses oversubscription. Tracks fleet spend. Moves unspent budget (`reallocate`) and returns it on `remove_agent`.
 - **Kill switch**: `kill(reason)` on one agent, `kill_all` on the fleet. The reason comes back in the error.
 - **Downgrade cascade** (`ModelTier`, `ModelCascade`): at the threshold, the agent steps down one tier and the charge tells you.
@@ -171,7 +178,7 @@ let table = llm_budget::PriceTable::from_litellm_json(&json).expect("valid price
 println!("{} models", table.len());
 ```
 
-Then charge with `AgentBudget::charge_model_with(&table, ...)`.
+Then give it to an agent with `AgentBudget::builder("a", 10.0).price_table(table)`, or charge with `AgentBudget::charge_model_with(&table, ...)`.
 
 ## How it works
 

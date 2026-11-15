@@ -2,7 +2,9 @@ use llm_budget::budget::AgentBudget;
 use llm_budget::error::BudgetError;
 use llm_budget::fleet::FleetAllocator;
 use llm_budget::model::ModelTier;
+#[cfg(feature = "store")]
 use llm_budget::persistence::BudgetStore;
+#[cfg(feature = "store")]
 use tempfile::TempDir;
 
 // ── AgentBudget end-to-end ───────────────────────────────────────────────────
@@ -107,6 +109,7 @@ async fn test_fleet_reallocate_unknown_dest_fails() {
 
 // ── Persistence end-to-end ───────────────────────────────────────────────────
 
+#[cfg(feature = "store")]
 #[tokio::test]
 async fn test_persistence_save_then_reload_from_disk() {
     let dir = TempDir::new().unwrap();
@@ -127,6 +130,7 @@ async fn test_persistence_save_then_reload_from_disk() {
     }
 }
 
+#[cfg(feature = "store")]
 #[tokio::test]
 async fn test_persistence_list_sessions() {
     let dir = TempDir::new().unwrap();
@@ -149,6 +153,7 @@ async fn test_persistence_list_sessions() {
     assert_eq!(sessions, vec!["s1", "s2", "s3"]);
 }
 
+#[cfg(feature = "store")]
 #[tokio::test]
 async fn test_persistence_delete_removes_from_disk_and_cache() {
     let dir = TempDir::new().unwrap();

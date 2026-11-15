@@ -59,6 +59,55 @@ impl Usage {
         Self { input_tokens, output_tokens, ..Self::default() }
     }
 
+    /// Build a usage from the four counts every provider bills separately:
+    /// uncached prompt tokens, prompt tokens read from the cache, prompt
+    /// tokens written to the cache, and output tokens. This is the shape
+    /// Anthropic reports; [`input_tokens`](Self::input_tokens) becomes the sum
+    /// of the first three.
+    ///
+    /// Use it to report usage from any client or framework without going
+    /// through JSON:
+    ///
+    /// ```
+    /// use llm_budget::Usage;
+    /// let u = Usage::from_parts(300, 11_000, 0, 250);
+    /// assert_eq!(u.input_tokens, 11_300);
+    /// assert_eq!(u.fresh_input_tokens(), 300);
+    /// ```
+    pub fn from_parts(uncached_input: u64, cache_read: u64, cache_write: u64, output: u64) -> Self {
+        Self {
+            input_tokens: uncached_input.saturating_add(cache_read).saturating_add(cache_write),
+            cached_input_tokens: cache_read,
+            cache_write_tokens: cache_write,
+            output_tokens: output,
+        }
+    }
+
+    /// Mark `tokens` of [`input_tokens`](Self::input_tokens) as read from the
+    /// prompt cache (OpenAI and Gemini style, where the prompt count already
+    /// includes them).
+    pub fn with_cache_read(mut self, tokens: u64) -> Self {
+        self.cached_input_tokens = tokens;
+        self
+    }
+
+    /// Mark `tokens` of [`input_tokens`](Self::input_tokens) as written to the
+    /// prompt cache.
+    pub fn with_cache_write(mut self, tokens: u64) -> Self {
+        self.cache_write_tokens = tokens;
+        self
+    }
+
+    /// Prompt plus output tokens.
+    pub fn total_tokens(&self) -> u64 {
+        self.input_tokens.saturating_add(self.output_tokens)
+    }
+
+    /// True when every count is zero (nothing was reported).
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
     /// Prompt tokens billed at the normal input price.
     pub fn fresh_input_tokens(&self) -> u64 {
         self.input_tokens
@@ -133,6 +182,65 @@ impl Usage {
         Err(BudgetError::InvalidConfig(
             "no usage block found (expected OpenAI, Anthropic or Gemini usage fields)".into(),
         ))
+    }
+}
+
+/// Adds counts field by field (saturating), for totalling the usage of
+/// several calls or of a multi-turn run.
+impl std::ops::Add for Usage {
+    type Output = Usage;
+    fn add(self, rhs: Usage) -> Usage {
+        Usage {
+            input_tokens: self.input_tokens.saturating_add(rhs.input_tokens),
+            cached_input_tokens: self.cached_input_tokens.saturating_add(rhs.cached_input_tokens),
+            cache_write_tokens: self.cache_write_tokens.saturating_add(rhs.cache_write_tokens),
+            output_tokens: self.output_tokens.saturating_add(rhs.output_tokens),
+        }
+    }
+}
+
+impl std::ops::AddAssign for Usage {
+    fn add_assign(&mut self, rhs: Usage) {
+        *self = *self + rhs;
+    }
+}
+
+impl std::iter::Sum for Usage {
+    fn sum<I: Iterator<Item = Usage>>(iter: I) -> Usage {
+        iter.fold(Usage::default(), |a, b| a + b)
+    }
+}
+
+/// Rough token count of a piece of text: about four characters per token.
+///
+/// Good enough to size a [reservation](crate::AgentBudget::reserve_for)
+/// before a call; the provider's reported usage is what gets booked.
+///
+/// ```
+/// assert_eq!(llm_budget::usage::estimate_tokens("Summarise this paper."), 6);
+/// ```
+pub fn estimate_tokens(text: &str) -> u64 {
+    (text.len() as u64).div_ceil(4)
+}
+
+/// Rough token count of every string in a JSON value, such as a serialized
+/// request or message list from any client: about four characters per token
+/// over the string values (keys are not counted). Long unbroken strings
+/// (base64 images or files) and long arrays of numbers count as 1,000 tokens
+/// each, roughly what providers bill for an image.
+///
+/// ```
+/// let req = serde_json::json!({"messages": [{"role": "user", "content": "Summarise this paper."}]});
+/// assert_eq!(llm_budget::usage::estimate_json_tokens(&req), 1 + 6);
+/// ```
+pub fn estimate_json_tokens(v: &Value) -> u64 {
+    match v {
+        Value::String(s) if s.len() > 4096 && !s.contains(' ') => 1_000,
+        Value::String(s) => estimate_tokens(s),
+        Value::Array(a) if a.len() > 256 && a.iter().all(Value::is_number) => 1_000,
+        Value::Array(a) => a.iter().map(estimate_json_tokens).sum(),
+        Value::Object(o) => o.values().map(estimate_json_tokens).sum(),
+        Value::Number(_) | Value::Bool(_) | Value::Null => 0,
     }
 }
 
@@ -224,6 +332,46 @@ mod tests {
         assert!((p.cost_usage(&u) - expected).abs() < 1e-9, "{}", p.cost_usage(&u));
         // without caching it is the plain price
         assert!((p.cost_usage(&Usage::new(1_000, 1_000)) - p.cost(1_000, 1_000)).abs() < 1e-15);
+    }
+
+    #[test]
+    fn provider_neutral_constructors() {
+        let a = Usage::from_parts(100, 2_000, 0, 50);
+        let b = Usage::new(2_100, 50).with_cache_read(2_000);
+        assert_eq!(a, b);
+        assert_eq!(a, Usage::from_json(r#"{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":2000}"#).unwrap());
+        let w = Usage::from_parts(10, 0, 30, 1);
+        assert_eq!(w, Usage::new(40, 1).with_cache_write(30));
+        assert_eq!(w.fresh_input_tokens(), 10);
+        assert_eq!(w.total_tokens(), 41);
+        assert!(Usage::default().is_empty());
+        assert!(!w.is_empty());
+        let max = Usage::from_parts(u64::MAX, 1, 1, 0);
+        assert_eq!(max.input_tokens, u64::MAX);
+    }
+
+    #[test]
+    fn usage_adds_up() {
+        let turns = [Usage::from_parts(10, 5, 0, 3), Usage::new(7, 2), Usage::from_parts(0, 0, 4, 1)];
+        let total: Usage = turns.iter().copied().sum();
+        assert_eq!(total, Usage { input_tokens: 26, cached_input_tokens: 5, cache_write_tokens: 4, output_tokens: 6 });
+        let mut acc = Usage::default();
+        for t in turns {
+            acc += t;
+        }
+        assert_eq!(acc, total);
+        assert_eq!((Usage::new(u64::MAX, 0) + Usage::new(1, 0)).input_tokens, u64::MAX);
+    }
+
+    #[test]
+    fn token_estimates() {
+        assert_eq!(estimate_tokens(""), 0);
+        assert_eq!(estimate_tokens("abcd"), 1);
+        assert_eq!(estimate_tokens("abcde"), 2);
+        let v: Value = serde_json::json!({"messages": [{"role": "user", "content": "abcdefgh"}], "n": 1});
+        assert_eq!(estimate_json_tokens(&v), 1 + 2); // "user" + "abcdefgh"; keys are not counted
+        let blob = "A".repeat(10_000);
+        assert_eq!(estimate_json_tokens(&Value::String(blob)), 1_000);
     }
 
     #[cfg(feature = "async-openai")]

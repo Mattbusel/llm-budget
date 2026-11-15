@@ -2,21 +2,35 @@
 //!
 //! # Where to go next
 //!
-//! - **Calls you price after they happen** (most of them): authorize with
-//!   [`AgentBudget::reserve`] before the call and book the real cost with
-//!   [`Reservation::settle`] after it, or [`AgentBudget::charge_usd_force`]
-//!   when nothing was reserved. Booked spend always matches the bill; see
-//!   [`budget`] for the full picture.
+//! - **Any client, any framework** (the core pattern): before the call,
+//!   [`AgentBudget::reserve_for`] holds the estimated cost (or refuses, so the
+//!   call is never made); after it, [`Reservation::settle_usage`] books what
+//!   the provider reported as a [`Usage`] (input, output, cache read and
+//!   cache write tokens). [`AgentBudget::record`] books a finished call when
+//!   nothing was reserved. Booked spend always matches the bill; see
+//!   [`budget`] for the full picture, and [`AgentBudget::reserve`] /
+//!   [`Reservation::settle`] for dollar amounts you price yourself.
 //! - **Calls you price before making them**: [`AgentBudget::charge_model`],
 //!   [`AgentBudget::charge_usage`] and friends check and book in one step.
 //! - **Memory**: each agent keeps its last 1,024 [`SpendRecord`]s by default.
 //!   Choose with [`AgentBudget::builder`] and [`AuditLog`], and ship records
 //!   out with [`AgentBudget::drain_audit_log`].
 //! - **Fleets**: [`FleetAllocator`] splits one total into per-agent caps.
-//! - **Prices**: [`PriceTable`] (232 models) and [`Usage`] for provider
-//!   usage blocks with prompt-cache counts.
+//! - **Prices**: [`PriceTable`]: the [llm-prices](https://docs.rs/llm-prices)
+//!   crate (dated, source-cited, long-context tiers) over a LiteLLM snapshot
+//!   for other providers, with your own prices or a hook on top; and [`Usage`]
+//!   for provider usage blocks with prompt-cache counts.
 //! - **rig agents** (feature `rig`): `rig::BudgetHook`, with a comparison to
 //!   rig's own token-count budget example in its module docs.
+//! - **genai** (feature `genai`): `genai::exec_chat` and
+//!   `genai::exec_chat_stream` run a genai `Client` call under a hold.
+//! - **async-openai** (feature `async-openai`): `openai::settle_response` and
+//!   `openai::StreamUsage` settle from a chat completion or a stream's final
+//!   usage chunk.
+//! - **No async runtime required**: everything except `BudgetStore`
+//!   (feature `store`, on by default) is runtime-free; the `async` charge
+//!   methods never await anything runtime-specific. Turn default features off
+//!   to drop tokio.
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![warn(missing_docs)]
 
@@ -25,6 +39,14 @@ pub mod error;
 pub mod fleet;
 pub mod model;
 pub mod observe;
+#[cfg(feature = "async-openai")]
+#[cfg_attr(docsrs, doc(cfg(feature = "async-openai")))]
+pub mod openai;
+#[cfg(feature = "genai")]
+#[cfg_attr(docsrs, doc(cfg(feature = "genai")))]
+pub mod genai;
+#[cfg(feature = "store")]
+#[cfg_attr(docsrs, doc(cfg(feature = "store")))]
 pub mod persistence;
 pub mod pricing;
 #[cfg(feature = "ratelimit")]
@@ -45,6 +67,8 @@ pub use budget::{
 pub use error::BudgetError;
 pub use fleet::{FleetAllocator, FleetBudget};
 pub use model::{ModelCascade, ModelTier};
+#[cfg(feature = "store")]
+#[cfg_attr(docsrs, doc(cfg(feature = "store")))]
 pub use persistence::BudgetStore;
 pub use pricing::{ModelPrice, PriceTable};
 pub use usage::Usage;

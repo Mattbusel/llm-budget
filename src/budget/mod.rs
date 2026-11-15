@@ -160,6 +160,12 @@ impl ChargeContext {
         self.output_tokens = u32::try_from(output_tokens).unwrap_or(u32::MAX);
         self
     }
+
+    /// Record the token counts of a provider-reported [`Usage`](crate::Usage)
+    /// (all prompt tokens as input).
+    pub fn usage(self, usage: &crate::usage::Usage) -> Self {
+        self.tokens(usage.input_tokens, usage.output_tokens)
+    }
 }
 
 /// How much of the audit log an envelope keeps in memory.
@@ -658,6 +664,8 @@ pub struct AgentBudget {
     pub agent_id: String,
     envelope: BudgetEnvelope,
     cascade: Arc<Mutex<ModelCascade>>,
+    /// `None` means the built-in table.
+    prices: Option<Arc<PriceTable>>,
 }
 
 /// Builds an [`AgentBudget`]; see [`AgentBudget::builder`].
@@ -668,6 +676,7 @@ pub struct AgentBudgetBuilder {
     tier: ModelTier,
     cascade_threshold: f64,
     audit_log: AuditLog,
+    prices: Option<Arc<PriceTable>>,
 }
 
 impl AgentBudgetBuilder {
@@ -690,6 +699,27 @@ impl AgentBudgetBuilder {
         self
     }
 
+    /// Price every model-based charge, [`record`](AgentBudget::record) and
+    /// [`reserve_for`](AgentBudget::reserve_for) from `table` instead of
+    /// [`PriceTable::builtin`]. This is the hook for negotiated rates,
+    /// fine-tunes and self-hosted models; see the [`pricing`](crate::pricing)
+    /// module docs. Pass an `Arc` to share one table between agents.
+    ///
+    /// ```
+    /// use llm_budget::{AgentBudget, ModelPrice, PriceTable, Usage};
+    /// # fn main() -> Result<(), llm_budget::BudgetError> {
+    /// let table = PriceTable::builtin().clone().with_price(ModelPrice::new("my-llama", "self", 0.1, 0.1));
+    /// let agent = AgentBudget::builder("a", 1.0).price_table(table).build()?;
+    /// agent.record("my-llama", &Usage::new(1_000_000, 0))?;
+    /// assert!((agent.spent_usd() - 0.1).abs() < 1e-9);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn price_table(mut self, table: impl Into<Arc<PriceTable>>) -> Self {
+        self.prices = Some(table.into());
+        self
+    }
+
     /// Build the budget.
     ///
     /// # Errors
@@ -702,6 +732,7 @@ impl AgentBudgetBuilder {
             agent_id: self.agent_id,
             envelope,
             cascade: Arc::new(Mutex::new(cascade)),
+            prices: self.prices,
         })
     }
 }
@@ -746,6 +777,7 @@ impl AgentBudget {
             tier: ModelTier::Standard,
             cascade_threshold: 0.2,
             audit_log: AuditLog::default(),
+            prices: None,
         }
     }
 
@@ -769,7 +801,8 @@ impl AgentBudget {
     }
 
     /// Charge a call to a named model at that model's real price from the
-    /// built-in [`PriceTable`].
+    /// agent's [`PriceTable`] (the built-in one unless set with
+    /// [`AgentBudgetBuilder::price_table`]).
     ///
     /// # Errors
     /// [`BudgetError::UnknownModel`] if the model is not in the table, otherwise
@@ -782,7 +815,8 @@ impl AgentBudget {
         task_id: Option<String>,
         session_id: Option<String>,
     ) -> Result<ChargeReceipt, BudgetError> {
-        self.charge_model_with(PriceTable::builtin(), model, input_tokens, output_tokens, task_id, session_id)
+        let cost = self.price_table().cost(model, u64::from(input_tokens), u64::from(output_tokens))?;
+        self.charge_inner(Some(model), Some(cost), input_tokens, output_tokens, task_id, session_id)
             .await
     }
 
@@ -806,7 +840,8 @@ impl AgentBudget {
 
     /// Charge a call from the usage block the provider returned (see
     /// [`crate::usage::Usage`]), priced with prompt-cache discounts from the
-    /// built-in [`PriceTable`]. This is the most accurate way to charge.
+    /// agent's [`PriceTable`]. Refused, booking nothing, if it would cross the
+    /// cap; for a call that already happened prefer [`record`](Self::record).
     ///
     /// # Errors
     /// [`BudgetError::UnknownModel`], otherwise see [`BudgetEnvelope::charge`].
@@ -817,7 +852,7 @@ impl AgentBudget {
         task_id: Option<String>,
         session_id: Option<String>,
     ) -> Result<ChargeReceipt, BudgetError> {
-        let cost = PriceTable::builtin().require(model)?.cost_usage(usage);
+        let cost = self.price_table().cost_usage(model, usage)?;
         let clamp = |n: u64| u32::try_from(n).unwrap_or(u32::MAX);
         self.charge_inner(Some(model), Some(cost), clamp(usage.input_tokens), clamp(usage.output_tokens), task_id, session_id)
             .await
@@ -860,6 +895,101 @@ impl AgentBudget {
         settle(&self.agent_id, &self.envelope, &self.cascade, 0, cost_usd, ctx)
     }
 
+    /// The table this agent prices models from: the built-in one unless set
+    /// with [`AgentBudgetBuilder::price_table`].
+    pub fn price_table(&self) -> &PriceTable {
+        match &self.prices {
+            Some(t) => t,
+            None => PriceTable::builtin(),
+        }
+    }
+
+    /// What `usage` on `model` costs at this agent's prices, in USD. Books
+    /// nothing.
+    ///
+    /// # Errors
+    /// [`BudgetError::UnknownModel`] if the model has no price.
+    pub fn cost_of(&self, model: &str, usage: &crate::usage::Usage) -> Result<f64, BudgetError> {
+        self.price_table().cost_usage(model, usage)
+    }
+
+    /// Book a call that has already happened, from the token counts the
+    /// provider reported, whatever client or framework made it.
+    ///
+    /// This is the framework-agnostic way to report spend: make the call
+    /// however you like, build a [`Usage`](crate::Usage) from its response
+    /// ([`Usage::from_parts`](crate::Usage::from_parts),
+    /// [`Usage::from_json`](crate::Usage::from_json), or a `From` impl), and
+    /// record it. Like [`charge_usd_force`](Self::charge_usd_force) it always
+    /// books, even past the cap, because the money is already spent;
+    /// [`ChargeOutcome::over_cap`] says whether to stop. To also stop calls
+    /// *before* they overspend, use [`reserve_for`](Self::reserve_for) and
+    /// [`Reservation::settle_usage`].
+    ///
+    /// ```
+    /// use llm_budget::{AgentBudget, Usage};
+    /// # fn main() -> Result<(), llm_budget::BudgetError> {
+    /// let agent = AgentBudget::builder("summariser", 1.00).build()?;
+    /// // 12k-token prompt, 10k of it from the cache, 400 output tokens.
+    /// let out = agent.record("gpt-4o", &Usage::new(12_000, 400).with_cache_read(10_240))?;
+    /// assert!(!out.over_cap);
+    /// assert!((agent.spent_usd() - out.recorded_usd).abs() < 1e-12);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    /// [`BudgetError::UnknownModel`] if the model has no price; nothing is
+    /// booked then (book a dollar amount with
+    /// [`charge_usd_force`](Self::charge_usd_force) instead).
+    pub fn record(&self, model: &str, usage: &crate::usage::Usage) -> Result<ChargeOutcome, BudgetError> {
+        self.record_with(model, usage, ChargeContext::new())
+    }
+
+    /// [`record`](Self::record), with a [`ChargeContext`] for the audit log.
+    /// The model and token counts are filled in from `model` and `usage`
+    /// unless `ctx` already sets them.
+    ///
+    /// # Errors
+    /// Same as [`record`](Self::record).
+    pub fn record_with(
+        &self,
+        model: &str,
+        usage: &crate::usage::Usage,
+        ctx: ChargeContext,
+    ) -> Result<ChargeOutcome, BudgetError> {
+        let cost = self.cost_of(model, usage)?;
+        Ok(self.charge_usd_force(cost, fill_ctx(ctx, model, usage)))
+    }
+
+    /// Hold headroom for a call to `model` whose expected size is `estimate`
+    /// (prompt tokens plus the output you allow), priced from this agent's
+    /// table. Settle it with [`Reservation::settle_usage`] once the provider
+    /// reports the real usage.
+    ///
+    /// ```
+    /// use llm_budget::{AgentBudget, Usage};
+    /// # fn main() -> Result<(), llm_budget::BudgetError> {
+    /// let agent = AgentBudget::builder("a", 0.10).build()?;
+    /// let hold = agent.reserve_for("gpt-4o", &Usage::new(8_000, 1_000))?; // $0.03 held
+    /// // ... make the call with any client ...
+    /// let out = hold.settle_usage("gpt-4o", &Usage::new(7_412, 230));
+    /// assert!(!out.over_cap);
+    /// assert_eq!(agent.reserved_usd(), 0.0);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    /// [`BudgetError::UnknownModel`] if the model has no price, otherwise the
+    /// same as [`reserve`](Self::reserve).
+    pub fn reserve_for(&self, model: &str, estimate: &crate::usage::Usage) -> Result<Reservation, BudgetError> {
+        let usd = self.cost_of(model, estimate)?;
+        let mut hold = self.reserve(usd)?;
+        hold.model = Some(model.to_string());
+        Ok(hold)
+    }
+
     /// Hold `estimate_usd` of headroom for a call you are about to make.
     ///
     /// The hold is taken with a compare-and-swap against the cap, so
@@ -891,6 +1021,8 @@ impl AgentBudget {
             agent_id: self.agent_id.clone(),
             envelope: self.envelope.clone(),
             cascade: Arc::clone(&self.cascade),
+            prices: self.prices.clone(),
+            model: None,
             nanos,
             open: true,
         })
@@ -1070,6 +1202,9 @@ pub struct Reservation {
     agent_id: String,
     envelope: BudgetEnvelope,
     cascade: Arc<Mutex<ModelCascade>>,
+    prices: Option<Arc<PriceTable>>,
+    /// The model given to `reserve_for`, a fallback for pricing the settlement.
+    model: Option<String>,
     nanos: u64,
     open: bool,
 }
@@ -1078,6 +1213,12 @@ impl Reservation {
     /// The amount held, in USD.
     pub fn estimate_usd(&self) -> f64 {
         nanos_to_usd(self.nanos)
+    }
+
+    /// The model this hold was taken for with
+    /// [`reserve_for`](AgentBudget::reserve_for), if any.
+    pub fn model(&self) -> Option<&str> {
+        self.model.as_deref()
     }
 
     /// Release the hold and book `actual_usd`, even if it is more than the
@@ -1093,8 +1234,54 @@ impl Reservation {
         settle(&self.agent_id, &self.envelope, &self.cascade, self.nanos, actual_usd, ctx)
     }
 
+    /// Release the hold and book what `usage` on `model` costs at the
+    /// agent's prices. This is the settlement half of the
+    /// [`reserve_for`](AgentBudget::reserve_for) / `settle_usage` pattern and
+    /// works with any client: build the [`Usage`](crate::Usage) from whatever
+    /// the provider returned.
+    ///
+    /// If `model` has no price (a dated id the provider echoes back, say), the
+    /// model given to [`reserve_for`](AgentBudget::reserve_for) is tried, and
+    /// failing that the reserved estimate is booked (the call happened, so
+    /// leaving it off the books would undercount). Check with
+    /// [`AgentBudget::cost_of`] first if you need to know. Like
+    /// [`settle`](Self::settle), this never fails and books past the cap.
+    pub fn settle_usage(self, model: &str, usage: &crate::usage::Usage) -> ChargeOutcome {
+        self.settle_usage_with(model, usage, ChargeContext::new())
+    }
+
+    /// [`settle_usage`](Self::settle_usage) with a [`ChargeContext`]; the
+    /// model and token counts are filled in unless `ctx` sets them.
+    pub fn settle_usage_with(self, model: &str, usage: &crate::usage::Usage, ctx: ChargeContext) -> ChargeOutcome {
+        let table = match &self.prices {
+            Some(t) => t.as_ref(),
+            None => PriceTable::builtin(),
+        };
+        let priced = table.cost_usage(model, usage).map(|usd| (usd, model)).or_else(|e| match self.model.as_deref() {
+            Some(m) => table.cost_usage(m, usage).map(|usd| (usd, m)),
+            None => Err(e),
+        });
+        let (usd, model) = match priced {
+            Ok((usd, m)) => (usd, m.to_string()),
+            Err(_) => (self.estimate_usd(), model.to_string()),
+        };
+        self.settle_with(usd, fill_ctx(ctx, &model, usage))
+    }
+
     /// Release the hold without booking anything (same as dropping it).
     pub fn release(self) {}
+}
+
+/// Fill the model and token counts of `ctx` from a usage report, keeping any
+/// the caller set.
+fn fill_ctx(mut ctx: ChargeContext, model: &str, usage: &crate::usage::Usage) -> ChargeContext {
+    if ctx.model.is_none() {
+        ctx.model = Some(model.to_string());
+    }
+    if ctx.input_tokens == 0 && ctx.output_tokens == 0 {
+        ctx = ctx.usage(usage);
+    }
+    ctx
 }
 
 impl Drop for Reservation {
@@ -1110,6 +1297,7 @@ impl std::fmt::Debug for Reservation {
         f.debug_struct("Reservation")
             .field("agent_id", &self.agent_id)
             .field("estimate_usd", &self.estimate_usd())
+            .field("model", &self.model)
             .field("open", &self.open)
             .finish()
     }
@@ -1392,7 +1580,9 @@ mod tests {
         check::<BudgetEnvelope>();
         check::<AgentBudget>();
         check::<crate::FleetAllocator>();
+        #[cfg(feature = "store")]
         check::<crate::BudgetStore>();
+        check::<Reservation>();
         check::<crate::PriceTable>();
         check::<BudgetError>();
     }
@@ -1405,8 +1595,11 @@ mod tests {
         for field in ["agent_id", "model", "cost_usd", "timestamp_ms"] {
             assert!(props.contains_key(field), "missing {field}");
         }
-        let snap = serde_json::to_value(schemars::schema_for!(crate::persistence::PersistedBudgetState)).unwrap();
-        assert!(snap["properties"]["snapshots"].is_object());
+        #[cfg(feature = "store")]
+        {
+            let snap = serde_json::to_value(schemars::schema_for!(crate::persistence::PersistedBudgetState)).unwrap();
+            assert!(snap["properties"]["snapshots"].is_object());
+        }
     }
 
     #[tokio::test]

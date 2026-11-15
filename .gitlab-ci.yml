@@ -28,6 +28,9 @@ test:
     - cargo run --example tokens --features tokens
     - cargo run --example rate_limit --features ratelimit,tracing
     - cargo run --example rig_budget_hook --features __rig-test-utils
+    - cargo run --example record_usage --no-default-features
+    - cargo run --example async_openai_budget --features async-openai
+    - cargo run --example genai_budget --features genai
 
 # The oldest Rust this crate promises to build on (rust-version in Cargo.toml).
 msrv:
@@ -37,7 +40,8 @@ msrv:
     # pick dependency versions that support this Rust
     CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: fallback
   script:
-    # every feature except `rig`, which needs Rust 1.95+ (rig-agent's own minimum)
+    # every feature except `rig` (needs Rust 1.95+, rig-agent's own minimum) and
+    # `genai` (follows genai's own minimum Rust)
     - cargo build --features tokens,ratelimit,tracing,metrics,schemars,async-openai
     - cargo test
     - cargo test --features tokens,ratelimit,tracing,metrics,schemars,async-openai
