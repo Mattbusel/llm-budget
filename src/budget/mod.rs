@@ -495,6 +495,11 @@ impl BudgetEnvelope {
     }
 
     /// Keep the audit log as `mode` says (trims what is already there).
+    ///
+    /// Clones of an envelope share one audit log, so this changes the mode
+    /// (and trims the records) for every clone, not just the value it is
+    /// called on. Set it once, right after [`new`](Self::new) and before the
+    /// envelope is cloned or shared.
     pub fn with_audit_log(self, mode: AuditLog) -> Self {
         {
             let mut log = lock(&self.log);
@@ -847,6 +852,10 @@ impl AgentBudget {
     /// for: refusing it would only make [`spent_usd`](Self::spent_usd) lower
     /// than the bill. Check [`ChargeOutcome::over_cap`] to decide whether to
     /// keep going. Negative, NaN and infinite amounts book $0.
+    ///
+    /// On an agent from [`FleetAllocator::get_agent`](crate::FleetAllocator::get_agent)
+    /// this books against the agent only: it is not added to
+    /// [`FleetBudget::spent_usd`](crate::FleetBudget::spent_usd).
     pub fn charge_usd_force(&self, cost_usd: f64, ctx: ChargeContext) -> ChargeOutcome {
         settle(&self.agent_id, &self.envelope, &self.cascade, 0, cost_usd, ctx)
     }
@@ -863,6 +872,10 @@ impl AgentBudget {
     /// [`BudgetError::KillSwitchActivated`] after [`kill`](Self::kill), or
     /// [`BudgetError::AgentExhausted`] when the estimate does not fit in what
     /// is left.
+    ///
+    /// On an agent from [`FleetAllocator::get_agent`](crate::FleetAllocator::get_agent)
+    /// the settled cost is booked against the agent only: it is not added to
+    /// [`FleetBudget::spent_usd`](crate::FleetBudget::spent_usd).
     pub fn reserve(&self, estimate_usd: f64) -> Result<Reservation, BudgetError> {
         if !estimate_usd.is_finite() || estimate_usd < 0.0 {
             return Err(BudgetError::InvalidConfig(format!("estimate must be >= 0, got {estimate_usd}")));

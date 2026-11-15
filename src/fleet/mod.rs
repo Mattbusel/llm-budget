@@ -87,6 +87,14 @@ impl FleetBudget {
 }
 
 /// Fleet allocator: the registry of agents and how the fleet budget is split between them.
+///
+/// [`FleetBudget::spent_usd`] counts only charges made through the
+/// `charge_agent*` methods here. Spend booked directly on an agent's
+/// [`AgentBudget`] from [`get_agent`](Self::get_agent), which includes
+/// [`AgentBudget::reserve`] / [`Reservation::settle`](crate::Reservation::settle),
+/// [`AgentBudget::charge_usd_force`] and the `rig` feature's `BudgetHook`,
+/// counts against that agent's cap but not against the fleet's `spent_usd`.
+/// For the fleet's real total, sum the agents' [`AgentBudget::spent_usd`].
 pub struct FleetAllocator {
     fleet: Arc<FleetBudget>,
     agents: DashMap<String, Arc<AgentBudget>>,
@@ -231,6 +239,9 @@ impl FleetAllocator {
 
     /// The budget of one registered agent. Charges made directly on it are not
     /// added to [`FleetBudget::spent_usd`]; go through the fleet for that.
+    /// That includes reservations and their settlement, forced charges and
+    /// the `rig` feature's `BudgetHook`, which have no fleet-level
+    /// counterpart yet.
     pub fn get_agent(&self, agent_id: &str) -> Option<Arc<AgentBudget>> {
         self.agent(agent_id).ok()
     }

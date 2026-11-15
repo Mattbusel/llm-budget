@@ -14,7 +14,8 @@
 //! let hook = BudgetHook::new(budget.clone(), "gpt-4o")
 //!     // also hold room for up to 1,000 completion tokens per call
 //!     .reserve_output_tokens(1_000);
-//! // AgentBuilder::new(model).add_hook(hook).build()
+//! // Add it before any other hook (see "Hook order" below):
+//! // AgentBuilder::new(model).add_hook(hook).add_hook(other).build()
 //! # let _ = hook;
 //! # Ok(())
 //! # }
@@ -38,9 +39,13 @@
 //!   cost: the provider's reported cost when rig has one, otherwise the
 //!   reported usage priced for `model`. Settlement always books the spend,
 //!   even past the cap, because the turn has been paid for. Only then, if the
-//!   budget is over its cap, does the hook return `Stop`, and (unless
-//!   [`keep_alive_on_refusal`](BudgetHook::keep_alive_on_refusal)) trip the
-//!   kill switch so other runs sharing the budget stop before their next call.
+//!   budget is over its cap, does the hook act: unless
+//!   [`keep_alive_on_refusal`](BudgetHook::keep_alive_on_refusal) is set it
+//!   trips the kill switch, so other runs sharing the budget stop before
+//!   their next call, and if the turn asked for tool calls it returns `Stop`
+//!   so this run makes no further model call. A turn with no tool calls is
+//!   the run's final answer: the hook returns `Continue` and the caller gets
+//!   the answer it has already paid for, instead of an error.
 //!
 //! So [`AgentBudget::spent_usd`] matches what the provider bills, and the cap
 //! is overshot by at most what in-flight calls cost beyond their estimates.
@@ -49,6 +54,32 @@
 //! discards and retries) is booked at its estimate when the next call
 //! starts, since the provider has most likely charged for it. A reservation
 //! still open when a run ends early is released.
+//!
+//! # Hook order: add `BudgetHook` first
+//!
+//! rig runs hooks in the order they were added with `add_hook`, and for
+//! `on_model_turn_finished` it stops at the first hook that returns anything
+//! other than `Continue`: the hooks after it are never called for that turn.
+//! So if another hook is added *before* `BudgetHook` and stops or retries a
+//! turn, `BudgetHook` never sees that turn's usage:
+//!
+//! - on `Stop`, the run ends, its open reservation is released, and the paid
+//!   turn is **not booked** at all;
+//! - on `Retry`, the turn is booked at its prompt-only estimate when the
+//!   next call starts, which is usually less than it cost.
+//!
+//! Add `BudgetHook` before every other hook. It returns `Continue` unless
+//! the budget is over its cap, so the hooks after it still run and can stop
+//! or retry the turn after it has been booked.
+//!
+//! # Fleets
+//!
+//! To cap one agent of a [`FleetAllocator`](crate::FleetAllocator), pass
+//! the budget from [`FleetAllocator::get_agent`](crate::FleetAllocator::get_agent).
+//! Turns count against that agent's cap and show in its audit log, but they
+//! are not added to [`FleetBudget::spent_usd`](crate::FleetBudget::spent_usd),
+//! which only counts charges made through `FleetAllocator::charge_agent*`.
+//! Sum the agents' `spent_usd()` for the fleet's real total.
 //!
 //! # How this differs from rig's `run_budget` example
 //!
@@ -64,13 +95,18 @@
 //! - **Across runs and agents.** The budget is an `Arc<AgentBudget>`, not
 //!   run-scoped state, so many runs, agents or processes in one service can
 //!   share a cap, and a [`FleetAllocator`](crate::FleetAllocator) can split a
-//!   fleet total into per-agent caps and move unspent money between them.
+//!   fleet total into per-agent caps and move unspent money between them
+//!   (see [Fleets](#fleets) for how the fleet's own total is counted).
 //! - **With an audit trail.** Every booked turn is a
 //!   [`SpendRecord`](crate::SpendRecord) with model, tokens and cost, and the
 //!   budget has a kill switch, a cheaper-tier cascade, and optional `tracing`
 //!   and `metrics` events.
 //!
-//! The two compose: add both hooks to cap tokens per run and dollars overall.
+//! The two compose, as long as `BudgetHook` is added first:
+//! `.add_hook(BudgetHook::new(..)).add_hook(TokenBudget { .. })`. A token cap
+//! that stops a turn after `BudgetHook` has booked it loses nothing; added
+//! the other way round, the turn the token cap stops on is never booked
+//! (see [Hook order](#hook-order-add-budgethook-first)).
 
 use std::borrow::Borrow;
 use std::collections::HashMap;
@@ -80,7 +116,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use rig_agent::agent::{
     AgentHook, CompletionCallAction, CompletionCallEvent, HookContext, ModelTurnAction, ModelTurnFinished,
 };
-use rig_agent::completion::Message;
+use rig_agent::completion::{AssistantContent, Message};
 
 use crate::budget::{AgentBudget, ChargeContext, Reservation};
 use crate::error::BudgetError;
@@ -131,6 +167,11 @@ impl Pending {
 
 /// Authorizes each rig model call against an [`AgentBudget`], books each
 /// finished turn, and stops the run at the cap. See the [module docs](self).
+///
+/// Add it with `add_hook` **before any other hook**. rig stops dispatching a
+/// finished turn at the first hook that does not return `Continue`, so a
+/// hook ahead of this one that stops or retries a turn keeps it from being
+/// booked (see [Hook order](self#hook-order-add-budgethook-first)).
 pub struct BudgetHook {
     id: u64,
     budget: Arc<AgentBudget>,
@@ -143,6 +184,10 @@ pub struct BudgetHook {
 impl BudgetHook {
     /// Charge every turn to `budget`, priced as `model` (a name from the
     /// built-in [`PriceTable`], such as `"gpt-4o"` or `"claude-sonnet-4-5"`).
+    ///
+    /// Register the hook before any other hook on the agent: hooks added
+    /// ahead of it can end a turn before it is booked (see
+    /// [Hook order](self#hook-order-add-budgethook-first)).
     pub fn new(budget: Arc<AgentBudget>, model: impl Into<String>) -> Self {
         Self {
             id: NEXT_HOOK_ID.fetch_add(1, Ordering::Relaxed),
@@ -160,7 +205,9 @@ impl BudgetHook {
         self
     }
 
-    /// Do not trip the kill switch when the cap is reached; only that run stops.
+    /// Do not trip the kill switch when the cap is reached; only that run
+    /// stops (and other runs sharing the budget stop at their next call,
+    /// since nothing is left to reserve).
     pub fn keep_alive_on_refusal(mut self) -> Self {
         self.kill_on_refusal = false;
         self
@@ -283,7 +330,13 @@ impl AgentHook for BudgetHook {
         if self.kill_on_refusal {
             self.budget.kill(&reason);
         }
-        ModelTurnAction::Stop(reason)
+        // A turn without tool calls ends the run with its answer, which has
+        // been paid for: keep it. Otherwise stop before the next model call.
+        if event.content.iter().any(|c| matches!(c, AssistantContent::ToolCall(_))) {
+            ModelTurnAction::Stop(reason)
+        } else {
+            ModelTurnAction::Continue
+        }
     }
 }
 

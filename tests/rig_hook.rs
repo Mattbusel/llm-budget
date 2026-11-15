@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use llm_budget::rig::BudgetHook;
 use llm_budget::{AgentBudget, AuditLog, ModelTier, PriceTable, Usage};
-use rig_agent::agent::AgentBuilder;
+use rig_agent::agent::{AgentBuilder, AgentHook, HookContext, ModelTurnAction, ModelTurnFinished};
 use rig_agent::completion::{Cost, Usage as RigUsage};
 use rig_agent::test_utils::{MockAddTool, MockCompletionModel, MockTurn};
 use serde_json::json;
@@ -181,6 +181,7 @@ async fn a_provider_reported_cost_wins_over_the_table() {
 #[tokio::test]
 async fn runs_sharing_a_budget_book_every_paid_turn() {
     let b = budget(0.10);
+    let mut answers = Vec::new();
     let mut stopped = 0;
     for _ in 0..5 {
         let model = MockCompletionModel::from_turns([MockTurn::text("ok").with_usage(three_cent_turn())]);
@@ -189,13 +190,90 @@ async fn runs_sharing_a_budget_book_every_paid_turn() {
             .build()
             .prompt("go")
             .await;
-        if r.is_err() {
-            stopped += 1;
+        match r {
+            Ok(answer) => answers.push(answer),
+            Err(_) => stopped += 1,
         }
     }
-    // Runs 1-3 fit ($0.09); run 4 is paid ($0.12) and trips the kill switch;
-    // run 5 never calls the provider.
-    assert_eq!(stopped, 2);
+    // Runs 1-3 fit ($0.09). Run 4 is paid ($0.12): its answer is a final
+    // one, so the caller gets it, and the kill switch trips. Run 5 never
+    // calls the provider.
+    assert_eq!(answers.len(), 4);
+    assert_eq!(stopped, 1);
+    assert!(b.is_killed());
     assert!((b.spent_usd() - 0.12).abs() < 1e-9, "spent {}", b.spent_usd());
     assert!((audit_sum(&b).await - b.spent_usd()).abs() < 1e-9);
+}
+
+#[tokio::test]
+async fn an_over_cap_final_answer_is_returned_not_discarded() {
+    // One $0.03 tool turn fits; the $0.03 final answer crosses the $0.05 cap.
+    let b = budget(0.05);
+    let model = MockCompletionModel::from_turns([
+        tool_turn("a", three_cent_turn()),
+        MockTurn::text("the answer").with_usage(three_cent_turn()),
+    ]);
+    let answer = AgentBuilder::new(model)
+        .tool(MockAddTool)
+        .add_hook(BudgetHook::new(b.clone(), "gpt-4o"))
+        .build()
+        .prompt("go")
+        .max_turns(10)
+        .await
+        .unwrap();
+    assert!(format!("{answer:?}").contains("the answer"), "{answer:?}");
+    assert!((b.spent_usd() - 0.06).abs() < 1e-9, "spent {}", b.spent_usd());
+    assert!(b.is_killed());
+    assert_eq!(b.reserved_usd(), 0.0);
+}
+
+/// Stops every finished turn, like a token cap that has been reached.
+struct StopEveryTurn;
+
+impl AgentHook for StopEveryTurn {
+    async fn on_model_turn_finished(&self, _ctx: &HookContext, _event: ModelTurnFinished<'_>) -> ModelTurnAction {
+        ModelTurnAction::Stop("token cap reached".into())
+    }
+}
+
+#[tokio::test]
+async fn budget_hook_first_books_a_turn_a_later_hook_stops() {
+    let b = budget(1.0);
+    let model = MockCompletionModel::from_turns([tool_turn("a", three_cent_turn()), MockTurn::text("done")]);
+    let err = AgentBuilder::new(model)
+        .tool(MockAddTool)
+        .add_hook(BudgetHook::new(b.clone(), "gpt-4o"))
+        .add_hook(StopEveryTurn)
+        .build()
+        .prompt("go")
+        .max_turns(10)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("token cap reached"), "{err}");
+    // The turn the second hook stopped on was paid for and is on the books.
+    assert!((b.spent_usd() - 0.03).abs() < 1e-9, "spent {}", b.spent_usd());
+    assert_eq!(b.audit_log().await.len(), 1);
+    assert_eq!(b.reserved_usd(), 0.0);
+}
+
+/// Pins the documented limitation: rig stops dispatching a finished turn at
+/// the first hook that does not return `Continue`, so a hook added before
+/// `BudgetHook` that stops the turn keeps it off the books. If this starts
+/// failing, rig changed its dispatch and the "Hook order" docs need updating.
+#[tokio::test]
+async fn a_hook_added_before_budget_hook_can_end_a_turn_unbooked() {
+    let b = budget(1.0);
+    let model = MockCompletionModel::from_turns([tool_turn("a", three_cent_turn()), MockTurn::text("done")]);
+    let err = AgentBuilder::new(model)
+        .tool(MockAddTool)
+        .add_hook(StopEveryTurn)
+        .add_hook(BudgetHook::new(b.clone(), "gpt-4o"))
+        .build()
+        .prompt("go")
+        .max_turns(10)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("token cap reached"), "{err}");
+    assert_eq!(b.spent_usd(), 0.0);
+    assert_eq!(b.reserved_usd(), 0.0);
 }
