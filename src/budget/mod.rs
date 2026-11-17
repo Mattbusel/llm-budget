@@ -570,16 +570,30 @@ impl BudgetEnvelope {
     /// [`BudgetError::KillSwitchActivated`] after [`kill`](Self::kill), or the
     /// `*Exhausted` variant matching the scope when the cap would be crossed.
     pub async fn charge(&self, record: SpendRecord) -> Result<f64, BudgetError> {
-        self.check_alive()?;
+        // Taken as a reservation and settled at once, so a scope closed in
+        // between keeps enough hold in its parent to cover the charge.
         let nanos = usd_to_nanos(record.cost_usd);
-        match self.inner.charge(record.cost_usd) {
-            Ok(total) => {
-                self.forward(&record, nanos);
-                lock(&self.log).push(record);
-                Ok(total)
-            }
-            Err(spent) => Err(self.exhausted(spent)),
+        self.hold(nanos)?;
+        Ok(self.book(record, nanos).0)
+    }
+
+    /// Reserve `nanos` of headroom on a live envelope.
+    ///
+    /// The scope is checked again after the reservation is taken: a close
+    /// stores `closed` before it reads the reservations to keep, and this
+    /// reads `closed` after it raised them, so (all in `SeqCst`) either the
+    /// close keeps this hold or this sees the close and gives it back. A scope
+    /// closed concurrently never admits work its parent no longer covers.
+    pub(crate) fn hold(&self, nanos: u64) -> Result<(), BudgetError> {
+        self.check_alive()?;
+        if let Err(spent) = self.inner.reserve_nanos(nanos) {
+            return Err(self.exhausted(spent));
         }
+        if let Err(e) = self.check_alive() {
+            self.release(nanos);
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// Book `record.cost_usd` whatever the cap or the kill switch say, and log
@@ -1186,11 +1200,11 @@ impl AgentBudget {
         if !estimate_usd.is_finite() || estimate_usd < 0.0 {
             return Err(BudgetError::InvalidConfig(format!("estimate must be >= 0, got {estimate_usd}")));
         }
-        self.envelope.check_alive()?;
         let nanos = usd_to_nanos(estimate_usd);
-        if let Err(spent) = self.envelope.atomic().reserve_nanos(nanos) {
-            let e = self.envelope.exhausted(spent);
-            crate::observe::refused(&self.agent_id, false, &e.to_string());
+        if let Err(e) = self.envelope.hold(nanos) {
+            if !matches!(e, BudgetError::ScopeClosed { .. } | BudgetError::KillSwitchActivated { .. }) {
+                crate::observe::refused(&self.agent_id, false, &e.to_string());
+            }
             return Err(e);
         }
         Ok(Reservation {

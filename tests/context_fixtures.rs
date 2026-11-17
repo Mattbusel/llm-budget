@@ -119,6 +119,34 @@ fn delegation_round_trip_through_a2a_metadata() {
 }
 
 #[test]
+fn a_capped_booker_books_at_most_the_reservation() {
+    let parent = AgentBudget::builder("caller", 1.00).build().unwrap();
+    let slice = parent.child("remote", Limit::Usd(0.10)).unwrap();
+    let report = BudgetContext::from_json(&json!({"incurred": {"cost": {"amount": "5", "currency": "USD"}}})).unwrap();
+    let mut booker = IncurredBooker::capped_at(Amount(100_000_000));
+    let out = booker.book(&slice, report.incurred.as_ref()).unwrap();
+    assert!(!out.over_cap);
+    assert_eq!(booker.booked(), Amount(100_000_000));
+    assert_eq!(booker.excess(), Amount(4_900_000_000));
+    assert!(booker.book(&slice, report.incurred.as_ref()).is_none());
+    drop(slice);
+    assert!((parent.spent_usd() - 0.10).abs() < 1e-12);
+    assert!(parent.reserved_usd().abs() < 1e-12);
+}
+
+#[test]
+fn the_largest_report_saturates() {
+    let b = AgentBudget::builder("caller", 1.00).build().unwrap();
+    let report = BudgetContext::from_json(&json!({"incurred": {
+        "cost": {"amount": "18446744073.709551615", "currency": "USD"},
+        "aggregatedChildCost": {"amount": "10000000000", "currency": "USD"}
+    }}))
+    .unwrap();
+    let out = IncurredBooker::new().book(&b, report.incurred.as_ref()).unwrap();
+    assert!(out.over_cap);
+}
+
+#[test]
 fn no_usd_amount_is_an_error() {
     let ctx = BudgetContext::from_json(&json!({"budget": {"cost": {"amount": "1", "currency": "EUR"}}})).unwrap();
     assert!(AgentBudget::from_context("x", &ctx).is_err());

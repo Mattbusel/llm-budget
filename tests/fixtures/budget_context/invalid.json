@@ -175,6 +175,46 @@
         "1",
         "USD"
       ]
+    },
+    {
+      "budget": {
+        "cost": {
+          "amount": 1e+300,
+          "currency": "USD"
+        }
+      }
+    },
+    {
+      "incurred": {
+        "cost": {
+          "amount": 1e+300,
+          "currency": "USD"
+        }
+      }
+    },
+    {
+      "budget": {
+        "cost": {
+          "amount": 18446744074,
+          "currency": "USD"
+        }
+      }
+    },
+    {
+      "incurred": {
+        "tokens": {
+          "cacheRead": 1,
+          "cache_read": 2
+        }
+      }
+    },
+    {
+      "incurred": {
+        "tokens": {
+          "cacheWrite": 1,
+          "cache_write": 2
+        }
+      }
     }
   ],
   "baggage": [

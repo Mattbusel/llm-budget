@@ -85,7 +85,10 @@ holds plus everything booked never exceed its limit through admission.
 at once while a monitor thread samples the parent's `utilization()`, and
 `tests/scope_props.rs` checks the books after random sequences of 1 to 80
 operations (children, reservations, settlements, overruns, forced charges,
-closes) on trees up to depth 4.
+closes) on trees up to depth 4. Three race tests (since 0.8.1) close a scope
+while another thread, holding the scope's `Arc` the way an integration does,
+reserves, charges or opens a grandchild on it, then admit a sibling for
+whatever the parent says is free, 5,000 to 20,000 times each.
 
 The one way past a limit is a settlement larger than its reservation: a
 call that cost more than estimated, or `charge_usd_force`. That money is
@@ -215,7 +218,7 @@ The wire format, under the extension URI
 - Absent is not zero: anything a reporter did not measure is left out.
 - `incurred` is cumulative in a stream; `IncurredBooker` books only growth.
 
-The Python package [agent-budget](https://pypi.org/project/agent-budget/)
+The Python package [agent-budget](https://github.com/Mattbusel/agent-budget)
 implements the same contexts, the same reserve/settle scopes, and an
 a2a-python plugin that does all of the above on both sides of an A2A call.
 Both libraries' tests read the fixtures in `tests/fixtures/budget_context/`.

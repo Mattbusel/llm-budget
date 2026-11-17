@@ -1,6 +1,6 @@
 [package]
 name = "llm-budget"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2021"
 rust-version = "1.85"
 description = "Hard USD spend limits for LLM agents: per-agent and fleet caps, child scopes for parallel sub-agents, real per-model prices, kill switch, automatic model downgrade"

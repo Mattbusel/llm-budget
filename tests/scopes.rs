@@ -227,3 +227,115 @@ fn depth_exceeded_is_typed() {
         other => panic!("{other:?}"),
     }
 }
+
+/// Poll a future that never waits on I/O to completion on this thread.
+fn run_now<F: std::future::Future>(fut: F) -> F::Output {
+    let mut fut = std::pin::pin!(fut);
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    loop {
+        if let std::task::Poll::Ready(v) = fut.as_mut().poll(&mut cx) {
+            return v;
+        }
+        thread::yield_now();
+    }
+}
+
+/// A scope settled by its orchestrator while an integration still holding
+/// `scope.budget()` reserves on it: either the reservation is refused, or
+/// the parent keeps covering it. Whatever the interleaving, a sibling admitted
+/// for the refunded room can never take the root past its cap.
+#[test]
+fn reserve_racing_close_never_overcommits_the_parent() {
+    let mut admitted_after_close = 0u32;
+    for _ in 0..20_000 {
+        let root = AgentBudget::builder("root", 1.00).build().unwrap();
+        let c = root.child("c", Limit::Usd(0.5)).unwrap();
+        let shared = Arc::clone(c.budget());
+        let start = Arc::new(Barrier::new(2));
+        let s2 = start.clone();
+        let t = thread::spawn(move || {
+            s2.wait();
+            shared.reserve(0.5).ok()
+        });
+        start.wait();
+        let receipt = c.settle();
+        let hold = t.join().unwrap();
+        // Admit a sibling for everything the root now says is free.
+        let left = root.remaining_usd();
+        let sib = if left > 1e-9 { Some(root.child("sibling", Limit::Usd(left)).unwrap()) } else { None };
+        if let Some(h) = hold {
+            admitted_after_close += 1;
+            assert!(receipt.released_usd < 0.5 - 1e-9, "a hold kept in flight was released: {receipt:?}");
+            h.settle(0.5);
+        }
+        if let Some(s) = &sib {
+            if let Ok(r) = s.reserve(s.remaining_usd()) {
+                let est = r.estimate_usd();
+                r.settle(est);
+            }
+        }
+        let committed = root.spent_usd() + root.reserved_usd();
+        assert!(committed <= 1.0 + 1e-9, "root committed {committed} on a $1.00 cap");
+        drop(sib);
+    }
+    // Both outcomes are legal; the assertion above is the point.
+    let _ = admitted_after_close;
+}
+
+/// The same race through `charge_usd`, which books without a reservation of
+/// its own: a charge that slips past the closed check is still covered.
+#[test]
+fn charge_racing_close_never_overcommits_the_parent() {
+    for _ in 0..5_000 {
+        let root = AgentBudget::builder("root", 1.00).build().unwrap();
+        let c = root.child("c", Limit::Usd(0.5)).unwrap();
+        let shared = Arc::clone(c.budget());
+        let start = Arc::new(Barrier::new(2));
+        let s2 = start.clone();
+        let t = thread::spawn(move || {
+            s2.wait();
+            run_now(shared.charge_usd(0.5, None, None)).is_ok()
+        });
+        start.wait();
+        let _receipt = c.settle();
+        let charged = t.join().unwrap();
+        let left = root.remaining_usd();
+        if left > 1e-9 {
+            let sib = root.child("sibling", Limit::Usd(left)).unwrap();
+            sib.reserve(left).unwrap().settle(left);
+        }
+        let committed = root.spent_usd() + root.reserved_usd();
+        assert!(committed <= 1.0 + 1e-9, "root committed {committed} on a $1.00 cap (charged: {charged})");
+    }
+}
+
+/// A child scope requested on a scope that is being closed is either refused
+/// or covered, never handed room its grandparent already gave away.
+#[test]
+fn child_racing_close_never_overcommits_the_root() {
+    for _ in 0..5_000 {
+        let root = AgentBudget::builder("root", 1.00).build().unwrap();
+        let c = root.child("c", Limit::Usd(0.5)).unwrap();
+        let shared = Arc::clone(c.budget());
+        let start = Arc::new(Barrier::new(2));
+        let s2 = start.clone();
+        let t = thread::spawn(move || {
+            s2.wait();
+            shared.child("gc", Limit::Usd(0.5)).ok()
+        });
+        start.wait();
+        let _receipt = c.settle();
+        let gc = t.join().unwrap();
+        let left = root.remaining_usd();
+        let sib = if left > 1e-9 { Some(root.child("sibling", Limit::Usd(left)).unwrap()) } else { None };
+        if let Some(g) = &gc {
+            if let Ok(r) = g.reserve(0.5) {
+                r.settle(0.5);
+            }
+        }
+        let committed = root.spent_usd() + root.reserved_usd();
+        assert!(committed <= 1.0 + 1e-9, "root committed {committed} on a $1.00 cap");
+        drop(gc);
+        drop(sib);
+    }
+}

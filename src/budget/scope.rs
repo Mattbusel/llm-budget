@@ -254,9 +254,10 @@ impl AgentBudget {
             let c = lock(&self.cascade);
             ModelCascade::new(c.current(), c.threshold(), nanos_to_usd(nanos))?
         };
-        if let Err(spent) = atomic.reserve_nanos(nanos) {
-            let e = self.envelope.exhausted(spent);
-            crate::observe::refused(&self.agent_id, false, &e.to_string());
+        if let Err(e) = self.envelope.hold(nanos) {
+            if !matches!(e, BudgetError::ScopeClosed { .. } | BudgetError::KillSwitchActivated { .. }) {
+                crate::observe::refused(&self.agent_id, false, &e.to_string());
+            }
             return Err(e);
         }
         self.envelope.delegations.fetch_add(1, Ordering::SeqCst);

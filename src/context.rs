@@ -26,7 +26,7 @@
 //!   is its delegates'. In a stream, `incurred` is **cumulative**:
 //!   [`IncurredBooker`] books only the growth.
 //!
-//! The Python package [`agent-budget`](https://pypi.org/project/agent-budget/)
+//! The Python package [`agent-budget`](https://github.com/Mattbusel/agent-budget)
 //! produces the same JSON and baggage, key for key; both test suites read
 //! the golden fixtures in `tests/fixtures/budget_context/`.
 //!
@@ -549,9 +549,16 @@ impl AgentBudget {
 /// Books a remote callee's reported cost on a local budget exactly once,
 /// even when the report arrives many times (stream updates, a resent final
 /// task): `incurred` is cumulative, so only its growth is booked.
+///
+/// [`capped_at`](Self::capped_at) bounds what it will ever book, usually to
+/// the reservation the callee was given: a callee reporting more is booked
+/// at the cap and the rest is kept in [`excess`](Self::excess) for the
+/// caller to flag. Without a cap every reported nano is booked.
 #[derive(Debug, Default, Clone)]
 pub struct IncurredBooker {
     booked: u64,
+    cap: Option<u64>,
+    excess: u64,
 }
 
 impl IncurredBooker {
@@ -560,16 +567,32 @@ impl IncurredBooker {
         Self::default()
     }
 
+    /// A booker that books at most `cap` in total.
+    pub fn capped_at(cap: Amount) -> Self {
+        Self { cap: Some(cap.0), ..Self::default() }
+    }
+
     /// What has been booked so far.
     pub fn booked(&self) -> Amount {
         Amount(self.booked)
+    }
+
+    /// The most a capped booker has seen reported above its cap.
+    pub fn excess(&self) -> Amount {
+        Amount(self.excess)
     }
 
     /// Book the part of `incurred`'s USD total not booked yet, as spend that
     /// already happened (it may cross the cap). `None` when nothing new was
     /// reported.
     pub fn book(&mut self, budget: &AgentBudget, incurred: Option<&Incurred>) -> Option<ChargeOutcome> {
-        let total = incurred?.total(crate::semconv::USD)?.0;
+        let mut total = incurred?.total(crate::semconv::USD)?.0;
+        if let Some(cap) = self.cap {
+            if total > cap {
+                self.excess = self.excess.max(total - cap);
+                total = cap;
+            }
+        }
         if total <= self.booked {
             return None;
         }

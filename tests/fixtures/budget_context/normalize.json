@@ -134,6 +134,44 @@
           "tokens": {}
         }
       }
+    },
+    {
+      "name": "large whole-number amount, exact",
+      "input": {
+        "budget": {
+          "cost": {
+            "amount": 18446744073,
+            "currency": "USD"
+          }
+        }
+      },
+      "context": {
+        "budget": {
+          "cost": {
+            "amount": "18446744073",
+            "currency": "USD"
+          }
+        }
+      }
+    },
+    {
+      "name": "snake_case cache counts",
+      "input": {
+        "incurred": {
+          "tokens": {
+            "cache_read": 5,
+            "cache_write": 7
+          }
+        }
+      },
+      "context": {
+        "incurred": {
+          "tokens": {
+            "cacheRead": 5,
+            "cacheWrite": 7
+          }
+        }
+      }
     }
   ],
   "baggage": [

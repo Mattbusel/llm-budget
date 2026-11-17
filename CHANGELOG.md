@@ -1,8 +1,18 @@
 # Changelog
 
+## [0.8.1] - 2026-11-17
+
+### Fixed
+- A child scope closed while another thread was taking a reservation on it (an integration such as `rig::BudgetHook` holding `scope.budget()` while the orchestrator settles or drops the guard on a timeout) could admit that reservation after the close had already refunded the whole hold, so the parent's books went past its cap once a sibling took the refunded room. `reserve`, `child` and envelope charges now take the hold and then check the scope again (store-then-load, `SeqCst`, the same pattern as `shrink_limit`): either the close keeps the hold, or the reservation sees the close, gives the hold back and returns `ScopeClosed`. `BudgetEnvelope::charge` now books through a reservation, so a charge racing a close is covered the same way. A review reproduced it as $1.50 committed on a $1.00 root; the new race test fails on 0.8.0 and passes on 0.8.1.
+- Docs and the 0.8.0 notes linked agent-budget's PyPI page before its first upload; they link the repository.
+
+### Added
+- `IncurredBooker::capped_at(amount)` and `IncurredBooker::excess()`: book at most the reservation a callee was given and keep what it reported above that, so one buggy callee cannot push every ancestor past its cap.
+- Tests: `tests/scopes.rs` races a close against `reserve`, `charge_usd` and `child` on the same scope; `tests/context_fixtures.rs` covers the capped booker and a saturating report. Shared fixtures gain JSON-number amounts too large to hold (`1e300`, `18446744074`), counts given under both `cacheRead` and `cache_read`, and an exact large whole-number amount.
+
 ## [0.8.0] - 2026-11-17
 
-Budgets that cross process boundaries. A `BudgetContext` in the shape of the A2A budget extension draft travels in A2A metadata, W3C baggage and MCP `_meta`, so a remote agent or tool server gets exactly the slice its caller reserved and reports back what it spent. The Python package [agent-budget](https://pypi.org/project/agent-budget/) 0.1.0 speaks the same format; both test suites read the same golden fixtures.
+Budgets that cross process boundaries. A `BudgetContext` in the shape of the A2A budget extension draft travels in A2A metadata, W3C baggage and MCP `_meta`, so a remote agent or tool server gets exactly the slice its caller reserved and reports back what it spent. The Python package [agent-budget](https://github.com/Mattbusel/agent-budget) speaks the same format; both test suites read the same golden fixtures.
 
 ### Added
 - Module `context`:
