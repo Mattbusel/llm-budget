@@ -88,8 +88,12 @@ fn prices_a_chat_span_and_emits_the_cost_inside_it() {
     assert_eq!(totals.priced_calls(), 1);
     assert_eq!(events.len(), 1);
     assert_eq!(events.0.lock().unwrap()[0].0, "chat");
-    let cost: f64 = events.field(0, "gen_ai.usage.cost").unwrap().parse().unwrap();
+    let cost: f64 = events.field(0, "gen_ai.usage.cost.amount").unwrap().parse().unwrap();
     assert!((cost - want).abs() < 1e-9);
+    assert_eq!(events.field(0, "gen_ai.usage.cost.currency").as_deref(), Some("\"USD\""));
+    assert_eq!(events.field(0, "gen_ai.usage.cost.source").as_deref(), Some("\"local\""));
+    // the pre-0.7 name is no longer written
+    assert!(events.field(0, "gen_ai.usage.cost").is_none());
     assert_eq!(events.field(0, "gen_ai.provider.name").as_deref(), Some("\"openai\""));
 }
 
@@ -199,6 +203,53 @@ fn a_reported_cost_on_the_span_wins() {
         span.record("gen_ai.usage.cost", 0.0123f64);
     });
     assert!((totals.total_usd() - 0.0123).abs() < 1e-9);
+}
+
+#[test]
+fn a_reported_semconv_amount_and_source_are_kept() {
+    let events = Events::default();
+    let layer = CostLayer::new();
+    let totals = layer.tracker();
+    let seen: Arc<Mutex<Vec<SpanCost>>> = Arc::default();
+    let sink = seen.clone();
+    let layer = layer.on_cost(move |c| sink.lock().unwrap().push(c.clone()));
+    let sub = tracing_subscriber::registry().with(layer).with(events.clone());
+    tracing::subscriber::with_default(sub, || {
+        let span = tracing::info_span!(
+            "chat",
+            gen_ai.request.model = "gpt-4o",
+            gen_ai.usage.input_tokens = 10_000u64,
+            gen_ai.usage.output_tokens = 500u64,
+            gen_ai.usage.cost.amount = Empty,
+            gen_ai.usage.cost.currency = "USD",
+            gen_ai.usage.cost.source = "provider",
+        );
+        span.record("gen_ai.usage.cost.amount", 0.0123f64);
+    });
+    assert!((totals.total_usd() - 0.0123).abs() < 1e-9);
+    let c = seen.lock().unwrap()[0].clone();
+    assert!(c.reported);
+    assert_eq!(c.source, Some(llm_budget::semconv::CostSource::Provider));
+    assert_eq!(events.field(0, "gen_ai.usage.cost.source").as_deref(), Some("\"provider\""));
+}
+
+#[test]
+fn a_reported_amount_in_another_currency_is_repriced_in_usd() {
+    let layer = CostLayer::new();
+    let totals = layer.tracker();
+    let sub = tracing_subscriber::registry().with(layer);
+    tracing::subscriber::with_default(sub, || {
+        let span = tracing::info_span!(
+            "chat",
+            gen_ai.request.model = "gpt-4o",
+            gen_ai.usage.input_tokens = 10_000u64,
+            gen_ai.usage.output_tokens = 500u64,
+            gen_ai.usage.cost.amount = Empty,
+            gen_ai.usage.cost.currency = "EUR",
+        );
+        span.record("gen_ai.usage.cost.amount", 9.0f64);
+    });
+    assert!((totals.total_usd() - price("gpt-4o", Usage::new(10_000, 500))).abs() < 1e-9);
 }
 
 #[test]

@@ -8,8 +8,11 @@
 //! [`PriceTable`]) and:
 //!
 //! - emits an `INFO` event on target `llm_budget::cost`, inside the span, with
-//!   `gen_ai.usage.cost` (USD) next to the model and token counts, so the cost
-//!   lands wherever your spans go (fmt logs, OpenTelemetry, Langfuse, ...);
+//!   `gen_ai.usage.cost.amount`, `gen_ai.usage.cost.currency` (`USD`) and
+//!   `gen_ai.usage.cost.source` (`local`, or the span's own source) next to
+//!   the model and token counts, so the cost lands wherever your spans go
+//!   (fmt logs, OpenTelemetry, Langfuse, ...). The names follow the proposed
+//!   OpenTelemetry GenAI cost convention; see [`crate::semconv`];
 //! - adds it to the running totals of a [`CostTracker`];
 //! - optionally books it on an [`AgentBudget`] and, once spend is over the
 //!   cap, trips the budget's kill switch so every `reserve_for`, `charge_*`
@@ -65,7 +68,11 @@
 //!   conventions and rig both count this way), so cache reads get the cache
 //!   price. Reasoning tokens are part of `gen_ai.usage.output_tokens`.
 //! - **Provider figure first**: if the span itself declares and records
-//!   `gen_ai.usage.cost`, that number is used instead of a price lookup.
+//!   `gen_ai.usage.cost.amount` (or the older `gen_ai.usage.cost`), that
+//!   number is used instead of a price lookup, with the span's
+//!   `gen_ai.usage.cost.source` if it has one. A reported amount in a
+//!   currency other than `USD` (`gen_ai.usage.cost.currency`) is not
+//!   converted: the call is priced from the table instead.
 //! - **No double counting**: a span whose descendants were already priced is
 //!   skipped. rig records each turn on a chat span and the run's sum on the
 //!   `invoke_agent` span around them; only the turns are counted.
@@ -100,6 +107,7 @@ use tracing_subscriber::Layer;
 
 use crate::budget::{AgentBudget, ChargeContext, ChargeOutcome};
 use crate::pricing::PriceTable;
+use crate::semconv::{self, CostSource};
 use crate::usage::Usage;
 
 /// Target of the events [`CostLayer`] emits.
@@ -112,7 +120,7 @@ const CACHE_WRITE: &str = "gen_ai.usage.cache_creation.input_tokens";
 const RESPONSE_MODEL: &str = "gen_ai.response.model";
 const REQUEST_MODEL: &str = "gen_ai.request.model";
 const PROVIDER: &[&str] = &["gen_ai.provider.name", "gen_ai.system"];
-const COST: &str = "gen_ai.usage.cost";
+const COST: &[&str] = &[semconv::COST_AMOUNT, semconv::LEGACY_COST];
 
 /// What one priced span cost, handed to [`CostLayer::on_cost`].
 #[derive(Debug, Clone)]
@@ -128,8 +136,13 @@ pub struct SpanCost {
     pub usage: Usage,
     /// Cost of the call in USD.
     pub cost_usd: f64,
-    /// True when the cost came from the span's own `gen_ai.usage.cost`.
+    /// True when the cost came from the span's own
+    /// `gen_ai.usage.cost.amount` (or `gen_ai.usage.cost`).
     pub reported: bool,
+    /// `gen_ai.usage.cost.source`: [`CostSource::Local`] when this layer
+    /// priced the call, the span's own source for a reported cost (`None`
+    /// when the span did not say).
+    pub source: Option<CostSource>,
     /// The booking on the budget, when [`CostLayer::budget`] is set.
     pub outcome: Option<ChargeOutcome>,
 }
@@ -283,16 +296,17 @@ impl CostLayer {
 
     /// Price `data`: the span's own cost if it reported one, else the first
     /// model id with a price.
-    fn price(&self, data: &GenAiSpan, usage: &Usage) -> Option<(String, f64, bool)> {
+    fn price(&self, data: &GenAiSpan, usage: &Usage) -> Option<(String, f64, Option<CostSource>)> {
         let model = data.response_model.as_deref().or(data.request_model.as_deref());
-        if let Some(cost) = data.reported_cost.filter(|c| c.is_finite() && *c >= 0.0) {
-            return Some((model.unwrap_or("unknown").to_string(), cost, true));
+        let usd = data.reported_currency.as_deref().is_none_or(|c| c.trim().eq_ignore_ascii_case(semconv::USD));
+        if let Some(cost) = data.reported_cost.filter(|c| usd && c.is_finite() && *c >= 0.0) {
+            return Some((model.unwrap_or("unknown").to_string(), cost, data.reported_source));
         }
         let table = self.table();
         [data.response_model.as_deref(), data.request_model.as_deref()]
             .into_iter()
             .flatten()
-            .find_map(|m| table.cost_usage(m, usage).ok().map(|usd| (m.to_string(), usd, false)))
+            .find_map(|m| table.cost_usage(m, usage).ok().map(|usd| (m.to_string(), usd, Some(CostSource::Local))))
     }
 }
 
@@ -307,6 +321,8 @@ struct GenAiSpan {
     request_model: Option<String>,
     provider: Option<String>,
     reported_cost: Option<f64>,
+    reported_currency: Option<String>,
+    reported_source: Option<CostSource>,
     /// A descendant was already priced; this span's usage is an aggregate.
     child_priced: bool,
 }
@@ -336,7 +352,7 @@ impl GenAiSpan {
             self.cache_read = Some(v);
         } else if name == CACHE_WRITE {
             self.cache_write = Some(v);
-        } else if name == COST {
+        } else if COST.contains(&name) {
             self.reported_cost = Some(v as f64);
         }
     }
@@ -348,9 +364,13 @@ impl GenAiSpan {
             self.request_model = Some(v.to_string());
         } else if PROVIDER.contains(&name) {
             self.provider = Some(v.to_string());
+        } else if name == semconv::COST_CURRENCY {
+            self.reported_currency = Some(v.to_string());
+        } else if name == semconv::COST_SOURCE {
+            self.reported_source = CostSource::parse(v.trim());
         } else if let Ok(n) = v.trim().parse::<u64>() {
             self.set_u64(name, n);
-        } else if name == COST {
+        } else if COST.contains(&name) {
             self.reported_cost = v.trim().parse::<f64>().ok();
         }
     }
@@ -368,7 +388,7 @@ impl Visit for GenAiSpan {
     }
 
     fn record_f64(&mut self, field: &Field, value: f64) {
-        if field.name() == COST {
+        if COST.contains(&field.name()) {
             self.reported_cost = Some(value);
         }
     }
@@ -416,7 +436,7 @@ where
             return;
         }
         let Some(usage) = data.usage() else { return };
-        let Some((model, cost_usd, reported)) = self.price(&data, &usage) else {
+        let Some((model, cost_usd, source)) = self.price(&data, &usage) else {
             let model = data.response_model.as_deref().or(data.request_model.as_deref());
             if let Some(model) = model {
                 self.tracker.0.unpriced.fetch_add(1, Ordering::Relaxed);
@@ -469,7 +489,9 @@ where
                 target: COST_TARGET,
                 parent: &id,
                 tracing::Level::INFO,
-                gen_ai.usage.cost = cost_usd,
+                gen_ai.usage.cost.amount = cost_usd,
+                gen_ai.usage.cost.currency = semconv::USD,
+                gen_ai.usage.cost.source = source.map(CostSource::as_str),
                 gen_ai.request.model = model.as_str(),
                 gen_ai.provider.name = data.provider.as_deref(),
                 gen_ai.usage.input_tokens = usage.input_tokens,
@@ -483,7 +505,17 @@ where
         }
 
         if let Some(f) = &self.on_cost {
-            f(&SpanCost { span_name: span.name(), model, provider: data.provider, usage, cost_usd, reported, outcome });
+            let reported = source != Some(CostSource::Local);
+            f(&SpanCost {
+                span_name: span.name(),
+                model,
+                provider: data.provider,
+                usage,
+                cost_usd,
+                reported,
+                source,
+                outcome,
+            });
         }
     }
 }

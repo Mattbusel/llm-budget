@@ -1,9 +1,9 @@
 [package]
 name = "llm-budget"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 rust-version = "1.85"
-description = "Hard USD spend limits for LLM agents: per-agent and fleet caps, real per-model prices, kill switch, automatic model downgrade"
+description = "Hard USD spend limits for LLM agents: per-agent and fleet caps, child scopes for parallel sub-agents, real per-model prices, kill switch, automatic model downgrade"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/Mattbusel/llm-budget"
@@ -186,6 +186,16 @@ required-features = ["genai"]
 [[example]]
 name = "tower_budget"
 required-features = ["tower"]
+
+# Four parallel sub-agents under one cap, offline: cargo run --example fanout
+[[example]]
+name = "fanout"
+
+# A rig orchestrator with two sub-agents in child scopes, offline.
+# cargo run --example rig_scopes --features __rig-test-utils
+[[example]]
+name = "rig_scopes"
+required-features = ["rig", "__rig-test-utils"]
 
 [[test]]
 name = "tower_layer"

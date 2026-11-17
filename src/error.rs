@@ -127,6 +127,38 @@ pub enum BudgetError {
     /// The tokenizer could not be loaded or used (feature `tokens`).
     #[error("Tokenizer error: {0}")]
     Tokenizer(String),
+
+    /// A child scope would be deeper than the tree allows
+    /// ([`AgentBudgetBuilder::max_depth`](crate::AgentBudgetBuilder::max_depth)).
+    #[error("Scope '{scope_id}' cannot be created at depth {depth}: the limit is {max_depth}")]
+    DepthExceeded {
+        /// The child scope that was refused.
+        scope_id: String,
+        /// The depth it would have had (the root is 0).
+        depth: u32,
+        /// The deepest scope the tree allows.
+        max_depth: u32,
+    },
+
+    /// The scope (or one of its ancestors) was settled or dropped, so it
+    /// admits no new reservations or charges. Calls already in flight still
+    /// settle.
+    #[error("Budget scope '{scope_id}' is closed")]
+    ScopeClosed {
+        /// The closed scope.
+        scope_id: String,
+    },
+
+    /// The model has no usable price and the agent's
+    /// [`UnpricedPolicy`](crate::UnpricedPolicy) says to refuse calls in this
+    /// case.
+    #[error("Model '{model}' has no usable price ({status}) and the unpriced-model policy denies it")]
+    Unpriced {
+        /// The model that was asked for.
+        model: String,
+        /// Why no price was found.
+        status: crate::pricing::PriceStatus,
+    },
 }
 
 #[cfg(test)]

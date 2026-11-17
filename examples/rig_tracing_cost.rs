@@ -8,7 +8,7 @@
 //! rig records OpenTelemetry GenAI fields (`gen_ai.request.model`,
 //! `gen_ai.usage.input_tokens`, ...) on a span for every model call.
 //! `CostLayer` sits in the tracing subscriber, prices each of those spans with
-//! llm-prices and emits `gen_ai.usage.cost` inside it. The agent code is plain
+//! llm-prices and emits `gen_ai.usage.cost.amount` inside it. The agent code is plain
 //! rig: no hook, no wrapper. With `tracing-opentelemetry` added after the
 //! layer, the cost travels with the span to Jaeger, Langfuse, Honeycomb, ...
 //!

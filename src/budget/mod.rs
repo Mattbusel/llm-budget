@@ -49,8 +49,15 @@
 
 use crate::error::BudgetError;
 use crate::model::{ModelCascade, ModelTier};
-use crate::pricing::PriceTable;
+use crate::pricing::{PriceAction, PriceStatus, PriceTable, UnpricedPolicy};
 use std::collections::VecDeque;
+
+pub mod scope;
+pub use scope::{Limit, ScopeGuard, ScopeReceipt, DEFAULT_MAX_DEPTH};
+
+/// Any [`AgentBudget`] is a budget scope: call [`AgentBudget::child`] on it
+/// to carve out a child scope. The alias names the role.
+pub type BudgetScope = AgentBudget;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -259,11 +266,31 @@ impl AtomicBudget {
         if !limit_usd.is_finite() || limit_usd <= 0.0 {
             return Err(BudgetError::InvalidConfig("limit must be positive".into()));
         }
-        Ok(Self {
+        Ok(Self::from_nanos(usd_to_nanos(limit_usd)))
+    }
+
+    /// A budget with a limit of exactly `limit_nanos` nano-dollars.
+    pub(crate) fn from_nanos(limit_nanos: u64) -> Self {
+        Self {
             committed_nanos: AtomicU64::new(0),
             reserved_nanos: AtomicU64::new(0),
-            limit_nanos: AtomicU64::new(usd_to_nanos(limit_usd)),
-        })
+            limit_nanos: AtomicU64::new(limit_nanos),
+        }
+    }
+
+    /// In-flight reservations, in nano-dollars.
+    pub(crate) fn reserved_nanos(&self) -> u64 {
+        self.reserved_nanos.load(Ordering::SeqCst)
+    }
+
+    /// Settled spend plus in-flight reservations, in nano-dollars.
+    pub(crate) fn committed_nanos(&self) -> u64 {
+        self.committed_nanos.load(Ordering::SeqCst)
+    }
+
+    /// The limit, in nano-dollars.
+    pub(crate) fn limit_nanos(&self) -> u64 {
+        self.limit_nanos.load(Ordering::SeqCst)
     }
 
     /// Atomically charge `cost_usd`. Returns `Ok(new_total)` or `Err(spent_so_far)`
@@ -469,6 +496,12 @@ pub struct BudgetEnvelope {
     killed: Arc<AtomicBool>,
     kill_reason: Arc<Mutex<Option<String>>>,
     log: Arc<Mutex<AuditBuffer>>,
+    /// Set for a child scope: the hold it draws on in its parent.
+    parent: Option<Arc<scope::ParentLink>>,
+    /// Set once a child scope is settled or dropped.
+    closed: Arc<AtomicBool>,
+    /// Spend booked here that was forwarded from descendant scopes, in nanos.
+    child_nanos: Arc<AtomicU64>,
 }
 
 /// The kind of thing a [`BudgetEnvelope`] limits.
@@ -490,14 +523,27 @@ impl BudgetEnvelope {
     /// # Errors
     /// [`BudgetError::InvalidConfig`] if the limit is not positive.
     pub fn new(scope_id: impl Into<String>, scope_kind: ScopeKind, limit_usd: f64) -> Result<Self, BudgetError> {
-        Ok(Self {
-            scope_id: scope_id.into(),
+        Ok(Self::with_atomic(scope_id.into(), scope_kind, AtomicBudget::new(limit_usd)?, AuditLog::default(), None))
+    }
+
+    fn with_atomic(
+        scope_id: String,
+        scope_kind: ScopeKind,
+        inner: AtomicBudget,
+        audit: AuditLog,
+        parent: Option<Arc<scope::ParentLink>>,
+    ) -> Self {
+        Self {
+            scope_id,
             scope_kind,
-            inner: Arc::new(AtomicBudget::new(limit_usd)?),
+            inner: Arc::new(inner),
             killed: Arc::new(AtomicBool::new(false)),
             kill_reason: Arc::new(Mutex::new(None)),
-            log: Arc::new(Mutex::new(AuditBuffer::new(AuditLog::default()))),
-        })
+            log: Arc::new(Mutex::new(AuditBuffer::new(audit))),
+            parent,
+            closed: Arc::new(AtomicBool::new(false)),
+            child_nanos: Arc::new(AtomicU64::new(0)),
+        }
     }
 
     /// Keep the audit log as `mode` says (trims what is already there).
@@ -522,8 +568,10 @@ impl BudgetEnvelope {
     /// `*Exhausted` variant matching the scope when the cap would be crossed.
     pub async fn charge(&self, record: SpendRecord) -> Result<f64, BudgetError> {
         self.check_alive()?;
+        let nanos = usd_to_nanos(record.cost_usd);
         match self.inner.charge(record.cost_usd) {
             Ok(total) => {
+                self.forward(&record, nanos);
                 lock(&self.log).push(record);
                 Ok(total)
             }
@@ -544,17 +592,64 @@ impl BudgetEnvelope {
     /// Release `reserved` nanos and book the record's cost in their place.
     /// Returns the settled total and whether the cap is now crossed.
     fn book(&self, record: SpendRecord, reserved: u64) -> (f64, bool) {
-        let committed = self.inner.settle_nanos(reserved, usd_to_nanos(sanitize_usd(record.cost_usd)));
+        let actual = usd_to_nanos(sanitize_usd(record.cost_usd));
+        // Forward first: while the reservation is still open here, a
+        // concurrent trim of a closed scope keeps enough hold to cover it.
+        self.forward(&record, actual);
+        let committed = self.inner.settle_nanos(reserved, actual);
         lock(&self.log).push(record);
+        self.trim_if_closed();
         (self.inner.settled_usd(committed), self.inner.over_limit(committed))
     }
 
+    /// Book spend forwarded from a child scope: `actual` nanos replace
+    /// `from_hold` nanos of the child's hold here.
+    pub(crate) fn book_from_child(&self, record: &SpendRecord, from_hold: u64, actual: u64) {
+        self.forward(record, actual);
+        self.inner.settle_nanos(from_hold, actual);
+        self.child_nanos.fetch_add(actual, Ordering::SeqCst);
+        lock(&self.log).push(record.clone());
+        self.trim_if_closed();
+    }
+
+    /// A child scope's spend is booked on every ancestor as it happens.
+    fn forward(&self, record: &SpendRecord, actual: u64) {
+        if let Some(link) = &self.parent {
+            link.forward(record, actual);
+        }
+    }
+
+    /// Release `nanos` of reservation without booking anything.
+    pub(crate) fn release(&self, nanos: u64) {
+        if nanos > 0 {
+            self.inner.settle_nanos(nanos, 0);
+            self.trim_if_closed();
+        }
+    }
+
+    /// A closed scope gives its parent back every part of its hold that no
+    /// in-flight reservation still needs.
+    fn trim_if_closed(&self) {
+        if let Some(link) = &self.parent {
+            if self.closed.load(Ordering::SeqCst) {
+                link.trim(&self.inner);
+            }
+        }
+    }
+
     fn check_alive(&self) -> Result<(), BudgetError> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(BudgetError::ScopeClosed { scope_id: self.scope_id.clone() });
+        }
         if self.killed.load(Ordering::SeqCst) {
             return Err(BudgetError::KillSwitchActivated {
                 agent_id: self.scope_id.clone(),
                 reason: self.kill_reason().unwrap_or_else(|| "kill switch is active".into()),
             });
+        }
+        // A child scope stops when any ancestor is killed or closed.
+        if let Some(link) = &self.parent {
+            link.parent().check_alive()?;
         }
         Ok(())
     }
@@ -666,6 +761,13 @@ pub struct AgentBudget {
     cascade: Arc<Mutex<ModelCascade>>,
     /// `None` means the built-in table.
     prices: Option<Arc<PriceTable>>,
+    /// What to do when a model has no usable price; `None` refuses with
+    /// `UnknownModel` (the behavior before 0.7).
+    policy: Option<UnpricedPolicy>,
+    /// 0 for a root budget, parent depth + 1 for a child scope.
+    depth: u32,
+    /// The deepest child scope this tree allows.
+    max_depth: u32,
 }
 
 /// Builds an [`AgentBudget`]; see [`AgentBudget::builder`].
@@ -677,6 +779,8 @@ pub struct AgentBudgetBuilder {
     cascade_threshold: f64,
     audit_log: AuditLog,
     prices: Option<Arc<PriceTable>>,
+    policy: Option<UnpricedPolicy>,
+    max_depth: u32,
 }
 
 impl AgentBudgetBuilder {
@@ -720,11 +824,32 @@ impl AgentBudgetBuilder {
         self
     }
 
+    /// What to do with a call whose model has no usable price, per
+    /// [`PriceStatus`]; see [`UnpricedPolicy`].
+    /// Child scopes inherit it. Without one, such calls are refused with
+    /// [`BudgetError::UnknownModel`].
+    pub fn unpriced_policy(mut self, policy: UnpricedPolicy) -> Self {
+        self.policy = Some(policy);
+        self
+    }
+
+    /// The deepest [child scope](AgentBudget::child) this budget's tree may
+    /// have (the root is depth 0; default [`DEFAULT_MAX_DEPTH`]). A deeper
+    /// [`child`](AgentBudget::child) fails with [`BudgetError::DepthExceeded`].
+    pub fn max_depth(mut self, max_depth: u32) -> Self {
+        self.max_depth = max_depth;
+        self
+    }
+
     /// Build the budget.
     ///
     /// # Errors
-    /// [`BudgetError::InvalidConfig`] for a non-positive limit or a threshold outside 0..=1.
+    /// [`BudgetError::InvalidConfig`] for a non-positive limit, a threshold
+    /// outside 0..=1, or an [`UnpricedPolicy`] with a negative `Reserve`.
     pub fn build(self) -> Result<AgentBudget, BudgetError> {
+        if let Some(p) = &self.policy {
+            p.validate()?;
+        }
         let envelope = BudgetEnvelope::new(self.agent_id.clone(), ScopeKind::Agent, self.limit_usd)?
             .with_audit_log(self.audit_log);
         let cascade = ModelCascade::new(self.tier, self.cascade_threshold, self.limit_usd)?;
@@ -733,6 +858,9 @@ impl AgentBudgetBuilder {
             envelope,
             cascade: Arc::new(Mutex::new(cascade)),
             prices: self.prices,
+            policy: self.policy,
+            depth: 0,
+            max_depth: self.max_depth,
         })
     }
 }
@@ -778,6 +906,8 @@ impl AgentBudget {
             cascade_threshold: 0.2,
             audit_log: AuditLog::default(),
             prices: None,
+            policy: None,
+            max_depth: DEFAULT_MAX_DEPTH,
         }
     }
 
@@ -938,10 +1068,15 @@ impl AgentBudget {
     /// # }
     /// ```
     ///
+    /// With an [`UnpricedPolicy`], a model with no usable price is booked at
+    /// $0 (`Allow`) or at the policy's flat amount (`Reserve`), or refused
+    /// (`Deny`).
+    ///
     /// # Errors
-    /// [`BudgetError::UnknownModel`] if the model has no price; nothing is
-    /// booked then (book a dollar amount with
-    /// [`charge_usd_force`](Self::charge_usd_force) instead).
+    /// [`BudgetError::UnknownModel`] (no policy) or [`BudgetError::Unpriced`]
+    /// (policy `Deny`) if the model has no price; nothing is booked then (book
+    /// a dollar amount with [`charge_usd_force`](Self::charge_usd_force)
+    /// instead).
     pub fn record(&self, model: &str, usage: &crate::usage::Usage) -> Result<ChargeOutcome, BudgetError> {
         self.record_with(model, usage, ChargeContext::new())
     }
@@ -958,8 +1093,40 @@ impl AgentBudget {
         usage: &crate::usage::Usage,
         ctx: ChargeContext,
     ) -> Result<ChargeOutcome, BudgetError> {
-        let cost = self.cost_of(model, usage)?;
+        let (cost, _) = self.price_or_policy(model, usage)?;
         Ok(self.charge_usd_force(cost, fill_ctx(ctx, model, usage)))
+    }
+
+    /// Why `model` can or cannot be priced for `usage` at this agent's
+    /// prices (see [`PriceTable::lookup`]).
+    pub fn price_status(&self, model: &str, usage: &crate::usage::Usage) -> PriceStatus {
+        self.price_table().lookup(model, usage).status
+    }
+
+    /// The agent's unpriced-model policy, if it has one.
+    pub fn unpriced_policy(&self) -> Option<&UnpricedPolicy> {
+        self.policy.as_ref()
+    }
+
+    /// The cost of `usage` on `model`, or what the [`UnpricedPolicy`] says to
+    /// hold or book when it has no usable price.
+    fn price_or_policy(&self, model: &str, usage: &crate::usage::Usage) -> Result<(f64, PriceStatus), BudgetError> {
+        let found = self.price_table().lookup(model, usage);
+        if let Some(usd) = found.cost_usd {
+            return Ok((usd, PriceStatus::Exact));
+        }
+        let status = found.status;
+        let action = self.policy.as_ref().and_then(|p| p.action(status));
+        match action {
+            None => Err(BudgetError::UnknownModel(model.to_string())),
+            Some(PriceAction::Allow) => Ok((0.0, status)),
+            Some(PriceAction::Reserve(usd)) => Ok((usd, status)),
+            Some(PriceAction::Deny) => {
+                let e = BudgetError::Unpriced { model: model.to_string(), status };
+                crate::observe::refused(&self.agent_id, false, &e.to_string());
+                Err(e)
+            }
+        }
     }
 
     /// Hold headroom for a call to `model` whose expected size is `estimate`
@@ -980,13 +1147,19 @@ impl AgentBudget {
     /// # }
     /// ```
     ///
+    /// When the model has no usable price, the agent's [`UnpricedPolicy`]
+    /// decides: hold nothing, hold a flat amount, or refuse
+    /// ([`Reservation::price_status`] says which case applied).
+    ///
     /// # Errors
-    /// [`BudgetError::UnknownModel`] if the model has no price, otherwise the
-    /// same as [`reserve`](Self::reserve).
+    /// [`BudgetError::Unpriced`] when the policy denies an unpriced model,
+    /// [`BudgetError::UnknownModel`] when the model has no price and the agent
+    /// has no policy, otherwise the same as [`reserve`](Self::reserve).
     pub fn reserve_for(&self, model: &str, estimate: &crate::usage::Usage) -> Result<Reservation, BudgetError> {
-        let usd = self.cost_of(model, estimate)?;
+        let (usd, status) = self.price_or_policy(model, estimate)?;
         let mut hold = self.reserve(usd)?;
         hold.model = Some(model.to_string());
+        hold.status = status;
         Ok(hold)
     }
 
@@ -1023,6 +1196,7 @@ impl AgentBudget {
             cascade: Arc::clone(&self.cascade),
             prices: self.prices.clone(),
             model: None,
+            status: PriceStatus::Exact,
             nanos,
             open: true,
         })
@@ -1105,6 +1279,13 @@ impl AgentBudget {
     /// True when nothing is left to spend or reserve.
     pub fn is_exhausted(&self) -> bool {
         self.envelope.is_exhausted()
+    }
+
+    /// Fraction of the cap spent or held by open reservations and child
+    /// scopes (0.0 to 1.0; above 1.0 only after a settlement larger than its
+    /// reservation or a forced charge).
+    pub fn utilization(&self) -> f64 {
+        self.envelope.utilization()
     }
 
     /// The tier the agent should use for its next call.
@@ -1205,6 +1386,8 @@ pub struct Reservation {
     prices: Option<Arc<PriceTable>>,
     /// The model given to `reserve_for`, a fallback for pricing the settlement.
     model: Option<String>,
+    /// How the estimate was priced.
+    status: PriceStatus,
     nanos: u64,
     open: bool,
 }
@@ -1219,6 +1402,13 @@ impl Reservation {
     /// [`reserve_for`](AgentBudget::reserve_for), if any.
     pub fn model(&self) -> Option<&str> {
         self.model.as_deref()
+    }
+
+    /// How the held amount was priced: [`PriceStatus::Exact`] for a priced
+    /// model (and for [`reserve`](AgentBudget::reserve), where you priced it),
+    /// otherwise the status the [`UnpricedPolicy`] acted on.
+    pub fn price_status(&self) -> PriceStatus {
+        self.status
     }
 
     /// Release the hold and book `actual_usd`, even if it is more than the
@@ -1287,7 +1477,7 @@ fn fill_ctx(mut ctx: ChargeContext, model: &str, usage: &crate::usage::Usage) ->
 impl Drop for Reservation {
     fn drop(&mut self) {
         if self.open {
-            self.envelope.atomic().settle_nanos(self.nanos, 0);
+            self.envelope.release(self.nanos);
         }
     }
 }

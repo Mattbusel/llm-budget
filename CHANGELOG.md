@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.7.0] - 2026-11-17
+
+Budget scopes for agents that delegate: a parent reserves a slice for each sub-agent, the children of a delegation together can never be admitted for more than the parent has left, and unused slices are refunded. Plus a typed policy for models with no price, and the proposed OpenTelemetry cost attribute names in `CostLayer`. Guide: `docs/budget-scopes.md`.
+
+### Added
+- Child scopes (module `budget::scope`):
+  - `AgentBudget::child(id, Limit::Usd(x) | Limit::Fraction(f))` reserves the slice from the parent with a compare-and-swap and returns a `ScopeGuard`, which derefs to a full `AgentBudget` (`reserve_for`, `record`, `charge_*`, `kill` and `child` for grandchildren). The child inherits the parent's price table, unpriced policy, audit-log setting, tier and cascade threshold. `BudgetScope` is an alias of `AgentBudget` naming the role.
+  - Everything a child books is booked on every ancestor at the same moment, out of its hold, with the child's name in each ancestor's audit log. `own_cost_usd()` and `child_cost_usd()` split a scope's spend into its own calls and its descendants' (the A2A budget draft's `cost` / `aggregatedChildCost`).
+  - `ScopeGuard::settle()` (or drop, including on a panic or a cancelled task) closes the scope and refunds the unused hold at once; calls in flight keep their part until they settle. It returns a `ScopeReceipt` (`held_usd`, `spent_usd`, `own_cost_usd`, `child_cost_usd`, `released_usd`, `in_flight_usd`, `over_hold`). A closed scope, and every scope below it, refuses new work with the new `BudgetError::ScopeClosed`. Killing a scope stops its whole subtree.
+  - `AgentBudgetBuilder::max_depth(n)` (default `DEFAULT_MAX_DEPTH` = 8) and the new `BudgetError::DepthExceeded { scope_id, depth, max_depth }`. `AgentBudget::depth`, `max_depth`, `parent_id`, `is_closed`, `utilization`. `ScopeGuard` is `Send + Sync + 'static`; `ScopeGuard::budget()` gives the child as an `Arc<AgentBudget>` for integrations such as `rig::BudgetHook`.
+- Typed unpriced-model policy:
+  - `PriceTable::lookup(model, &usage)` returns a `PriceLookup` with a `PriceStatus`: `Exact`, `Unpriced` (known to the catalog without a usable price), `Missing` (no source knows the id) or `NoCatalog` (no price data at all). The names and their serde spellings (`exact`, `unpriced`, `missing`, `noCatalog`) mirror agentgateway's `CostLookupStatus`. `PriceTable::with_unpriced(model)` declares a model as known but unpriced.
+  - `UnpricedPolicy { unpriced, missing, no_catalog }`, one `PriceAction` (`Allow`, `Reserve(usd)`, `Deny`) per status, set with `AgentBudgetBuilder::unpriced_policy`. `reserve_for`, `record`, and every integration built on them (tower `BudgetLayer`, genai, async-openai) follow it; `Deny` returns the new `BudgetError::Unpriced { model, status }`. `Reservation::price_status()`, `AgentBudget::price_status()` and `unpriced_policy()`. Without a policy the behavior is unchanged (`UnknownModel`).
+- Module `semconv`: the `gen_ai.usage.cost.amount` / `.currency` / `.source` names and `CostSource` (`provider` / `local`).
+- `examples/fanout.rs` (four parallel sub-agents under one cap, compared with passing the remainder down) and `examples/rig_scopes.rs` (a rig orchestrator with two sub-agents in child scopes, offline). CI runs both.
+- Tests: `tests/scopes.rs` (the two-delegate overshoot of a propagated remainder and the same delegates under child scopes, 64 parallel children with grandchildren under a utilization monitor, a panicking sub-agent, a cancelled tokio task, fraction slices raced from 8 threads), `tests/scope_props.rs` (proptest: random trees of scopes, holds, settlements, overruns and closes keep every scope's books exact), `tests/unpriced_policy.rs` (every `PriceStatus` under every `PriceAction`).
+
+### Changed
+- `tracing_layer::CostLayer` cost events use the attribute names proposed in open-telemetry/semantic-conventions-genai#443: `gen_ai.usage.cost.amount`, `gen_ai.usage.cost.currency` (`USD`) and `gen_ai.usage.cost.source` (`local` when the layer priced the call, the span's own source for a reported cost). The 0.5/0.6 field `gen_ai.usage.cost` is no longer emitted; it is still read as a reported cost on spans, next to `gen_ai.usage.cost.amount`. A reported amount whose `gen_ai.usage.cost.currency` is not `USD` is ignored and the call is priced from the table. `SpanCost::source` added.
+- A test that expected `openai/gpt-4o` to resolve to the bare `gpt-4o` row now uses an unlisted prefix: since llm-prices 1.6, `openai/gpt-4o` is an OpenRouter row of its own.
+
 ## [0.6.0] - 2026-11-16
 
 A hard USD cap as a tower `Layer`, for any client or proxy built on tower services.

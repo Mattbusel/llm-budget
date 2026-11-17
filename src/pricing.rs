@@ -56,6 +56,40 @@
 //! let usd = price.cost(1_000, 500);
 //! assert!((usd - (1_000.0 * 2.5 + 500.0 * 10.0) / 1_000_000.0).abs() < 1e-12);
 //! ```
+//!
+//! # When there is no price
+//!
+//! [`PriceTable::lookup`] says *why* a model could not be priced, as a
+//! [`PriceStatus`]: the catalog knows the model but has no usable price
+//! ([`Unpriced`](PriceStatus::Unpriced)), no source knows the model
+//! ([`Missing`](PriceStatus::Missing)), or there is no price data to look in
+//! ([`NoCatalog`](PriceStatus::NoCatalog)). An [`UnpricedPolicy`] picks a
+//! [`PriceAction`] for each, so a self-hosted model can be let through while
+//! a typo in a model id is refused:
+//!
+//! ```
+//! use llm_budget::pricing::{PriceAction, PriceStatus, PriceTable, UnpricedPolicy};
+//! use llm_budget::{AgentBudget, BudgetError, Usage};
+//!
+//! # fn main() -> Result<(), BudgetError> {
+//! let table = PriceTable::builtin().clone().with_unpriced("in-house-70b");
+//! let policy = UnpricedPolicy::new(
+//!     PriceAction::Reserve(0.05), // listed without a price: hold a flat $0.05
+//!     PriceAction::Deny,          // an id nobody knows: refuse before the call
+//!     PriceAction::Deny,          // no price data at all: refuse
+//! );
+//! let agent = AgentBudget::builder("a", 1.0).price_table(table).unpriced_policy(policy).build()?;
+//!
+//! let hold = agent.reserve_for("in-house-70b", &Usage::new(1_000, 500))?;
+//! assert_eq!(hold.price_status(), PriceStatus::Unpriced);
+//! assert!((hold.estimate_usd() - 0.05).abs() < 1e-12);
+//! hold.release();
+//!
+//! let err = agent.reserve_for("gtp-4o", &Usage::new(1_000, 500)).unwrap_err();
+//! assert!(matches!(err, BudgetError::Unpriced { status: PriceStatus::Missing, .. }));
+//! # Ok(())
+//! # }
+//! ```
 
 use crate::error::BudgetError;
 use crate::usage::Usage;
@@ -180,6 +214,131 @@ pub struct PriceTable {
     /// Consult the llm-prices crate (id resolution, long-context tiers).
     llm_prices: bool,
     hook: Option<PriceHook>,
+    /// Models the caller declared as known but without a price.
+    unpriced: HashSet<String>,
+}
+
+/// Why a model could or could not be priced; see [`PriceTable::lookup`].
+///
+/// Mirrors agentgateway's `CostLookupStatus`, so a budget and a gateway in
+/// front of it agree on what "no price" means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum PriceStatus {
+    /// A price was found and the cost is exact.
+    Exact,
+    /// The catalog knows the model but has no usable price for this call
+    /// (a model declared with [`PriceTable::with_unpriced`], or one llm-prices
+    /// lists without the prices this call needs).
+    Unpriced,
+    /// No source in the table knows the model.
+    Missing,
+    /// The table has no price data at all: no rows, no llm-prices lookup and
+    /// no hook.
+    NoCatalog,
+}
+
+impl PriceStatus {
+    /// The status as agentgateway spells it in logs and metric labels
+    /// (`exact`, `unpriced`, `missing`, `noCatalog`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PriceStatus::Exact => "exact",
+            PriceStatus::Unpriced => "unpriced",
+            PriceStatus::Missing => "missing",
+            PriceStatus::NoCatalog => "noCatalog",
+        }
+    }
+}
+
+impl std::fmt::Display for PriceStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The result of [`PriceTable::lookup`]: a status and, when it is
+/// [`PriceStatus::Exact`], the cost.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub struct PriceLookup {
+    /// Why the cost is or is not known.
+    pub status: PriceStatus,
+    /// The cost in USD; `Some` exactly when `status` is `Exact`.
+    pub cost_usd: Option<f64>,
+}
+
+/// What to do with a call whose model has no usable price.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum PriceAction {
+    /// Let the call through without holding anything. Its cost is unknown, so
+    /// it is booked at $0 unless the settlement can price it.
+    Allow,
+    /// Hold this many USD for the call, and book that amount if the
+    /// settlement cannot price it either.
+    Reserve(f64),
+    /// Refuse the call with [`BudgetError::Unpriced`]; nothing is booked.
+    Deny,
+}
+
+/// A [`PriceAction`] for each reason a price can be missing.
+///
+/// There is deliberately no single "fail closed" switch: an id no source
+/// knows is usually a typo or a brand-new model (refuse it, or hold a lot),
+/// while a model the catalog lists without a price is usually self-hosted or
+/// free (allow it, or hold a flat amount). Give an agent a policy with
+/// [`AgentBudgetBuilder::unpriced_policy`](crate::AgentBudgetBuilder::unpriced_policy);
+/// [`AgentBudget::reserve_for`](crate::AgentBudget::reserve_for),
+/// [`AgentBudget::record`](crate::AgentBudget::record) and every integration
+/// built on them follow it, and child scopes inherit it. Without a policy an
+/// unpriced model is refused with [`BudgetError::UnknownModel`], as in earlier
+/// releases.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct UnpricedPolicy {
+    /// For [`PriceStatus::Unpriced`].
+    pub unpriced: PriceAction,
+    /// For [`PriceStatus::Missing`].
+    pub missing: PriceAction,
+    /// For [`PriceStatus::NoCatalog`].
+    pub no_catalog: PriceAction,
+}
+
+impl UnpricedPolicy {
+    /// A policy with one action per status.
+    pub fn new(unpriced: PriceAction, missing: PriceAction, no_catalog: PriceAction) -> Self {
+        Self { unpriced, missing, no_catalog }
+    }
+
+    /// The action for `status`, or `None` for [`PriceStatus::Exact`] (a
+    /// priced call needs no policy).
+    pub fn action(&self, status: PriceStatus) -> Option<PriceAction> {
+        match status {
+            PriceStatus::Exact => None,
+            PriceStatus::Unpriced => Some(self.unpriced),
+            PriceStatus::Missing => Some(self.missing),
+            PriceStatus::NoCatalog => Some(self.no_catalog),
+        }
+    }
+
+    /// Check that every `Reserve` amount is a finite, non-negative number.
+    ///
+    /// # Errors
+    /// [`BudgetError::InvalidConfig`] naming the bad amount.
+    pub fn validate(&self) -> Result<(), BudgetError> {
+        for a in [self.unpriced, self.missing, self.no_catalog] {
+            if let PriceAction::Reserve(x) = a {
+                if !x.is_finite() || x < 0.0 {
+                    return Err(BudgetError::InvalidConfig(format!("PriceAction::Reserve must be >= 0, got {x}")));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl std::fmt::Debug for PriceTable {
@@ -189,6 +348,7 @@ impl std::fmt::Debug for PriceTable {
             .field("overridden", &self.overridden.len())
             .field("llm_prices", &self.llm_prices)
             .field("hook", &self.hook.is_some())
+            .field("unpriced", &self.unpriced.len())
             .finish()
     }
 }
@@ -352,6 +512,52 @@ impl PriceTable {
     pub fn with_price(mut self, price: ModelPrice) -> Self {
         self.insert(price);
         self
+    }
+
+    /// Declare `model` as known to your catalog but without a price (a
+    /// self-hosted model, or one whose price you have not set yet).
+    /// [`lookup`](Self::lookup) then reports [`PriceStatus::Unpriced`] for it
+    /// instead of [`PriceStatus::Missing`], so an [`UnpricedPolicy`] can treat
+    /// it differently from an id nobody knows. A price from the hook, an
+    /// inserted price or a table row still wins.
+    pub fn with_unpriced(mut self, model: impl Into<String>) -> Self {
+        self.unpriced.insert(model.into());
+        self
+    }
+
+    /// Price `usage` on `model`, and say why when it cannot be priced.
+    ///
+    /// Same lookup order as [`cost_usage`](Self::cost_usage). When nothing
+    /// prices the call the status is [`PriceStatus::Unpriced`] if the model
+    /// was declared with [`with_unpriced`](Self::with_unpriced) or llm-prices
+    /// lists it without the prices this call needs,
+    /// [`PriceStatus::NoCatalog`] if the table has no rows, no llm-prices
+    /// lookup and no hook, and [`PriceStatus::Missing`] otherwise.
+    ///
+    /// ```
+    /// use llm_budget::pricing::{PriceStatus, PriceTable};
+    /// use llm_budget::Usage;
+    /// let u = Usage::new(1_000, 100);
+    /// assert_eq!(PriceTable::builtin().lookup("gpt-4o", &u).status, PriceStatus::Exact);
+    /// assert_eq!(PriceTable::builtin().lookup("no-such-model-x", &u).status, PriceStatus::Missing);
+    /// assert_eq!(PriceTable::new().lookup("gpt-4o", &u).status, PriceStatus::NoCatalog);
+    /// let t = PriceTable::builtin().clone().with_unpriced("in-house-70b");
+    /// assert_eq!(t.lookup("in-house-70b", &u).status, PriceStatus::Unpriced);
+    /// ```
+    pub fn lookup(&self, model: &str, usage: &Usage) -> PriceLookup {
+        if let Ok(usd) = self.cost_usage(model, usage) {
+            return PriceLookup { status: PriceStatus::Exact, cost_usd: Some(usd) };
+        }
+        let bare = model.split_once('/').map(|(_, b)| b);
+        let declared = self.unpriced.contains(model) || bare.is_some_and(|b| self.unpriced.contains(b));
+        let status = if declared || (self.llm_prices && llm_prices::lookup(model).is_some()) {
+            PriceStatus::Unpriced
+        } else if self.prices.is_empty() && !self.llm_prices && self.hook.is_none() && self.unpriced.is_empty() {
+            PriceStatus::NoCatalog
+        } else {
+            PriceStatus::Missing
+        };
+        PriceLookup { status, cost_usd: None }
     }
 
     /// Cost in USD of one call to `model` described by `usage`.
@@ -552,7 +758,10 @@ mod tests {
     #[test]
     fn provider_prefix_is_stripped() {
         let t = PriceTable::builtin();
-        assert_eq!(t.get("openai/gpt-4o"), t.get("gpt-4o"));
+        // A prefix no source lists as its own id falls back to the bare id.
+        // (Since llm-prices 1.6, `openai/gpt-4o` is an OpenRouter row of its own.)
+        assert_eq!(t.get("acme-gateway/gpt-4o"), t.get("gpt-4o"));
+        assert!(t.get("acme-gateway/gpt-4o").is_some());
         assert!(t.get("nobody/no-such-model").is_none());
     }
 

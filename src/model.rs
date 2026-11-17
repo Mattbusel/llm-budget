@@ -90,6 +90,11 @@ impl ModelCascade {
         self.current
     }
 
+    /// The remaining fraction at or below which the cascade steps down.
+    pub(crate) fn threshold(&self) -> f64 {
+        self.pressure_threshold
+    }
+
     /// Update the budget the threshold is measured against (after a reallocation).
     pub(crate) fn set_total_budget(&mut self, total: f64) {
         if total > 0.0 {

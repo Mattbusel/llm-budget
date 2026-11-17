@@ -15,6 +15,14 @@
 //! - **Memory**: each agent keeps its last 1,024 [`SpendRecord`]s by default.
 //!   Choose with [`AgentBudget::builder`] and [`AuditLog`], and ship records
 //!   out with [`AgentBudget::drain_audit_log`].
+//! - **Sub-agents and parallel fan-out**: [`AgentBudget::child`] reserves a
+//!   slice of a budget for a sub-agent ([`Limit::Usd`] or
+//!   [`Limit::Fraction`]); everything the child books is booked on its
+//!   ancestors at once, and closing its [`ScopeGuard`] refunds the rest, so
+//!   parallel children can never be admitted for more than the parent has
+//!   left. See [`budget::scope`].
+//! - **Models with no price**: [`UnpricedPolicy`] picks a [`PriceAction`]
+//!   for each [`PriceStatus`] (`Unpriced`, `Missing`, `NoCatalog`).
 //! - **Fleets**: [`FleetAllocator`] splits one total into per-agent caps.
 //! - **Prices**: [`PriceTable`]: the [llm-prices](https://docs.rs/llm-prices)
 //!   crate (dated, source-cited, long-context tiers) over a LiteLLM snapshot
@@ -33,7 +41,8 @@
 //!   usage chunk.
 //! - **Traced apps** (feature `tracing-layer`): `tracing_layer::CostLayer`
 //!   prices every span that carries OpenTelemetry GenAI usage fields (rig
-//!   records them on each model call), emits `gen_ai.usage.cost` and can
+//!   records them on each model call), emits `gen_ai.usage.cost.amount` /
+//!   `.currency` / `.source` (the proposed OpenTelemetry GenAI cost names) and can
 //!   book the spend on a capped budget, with no change to the traced code.
 //! - **No async runtime required**: everything except `BudgetStore`
 //!   (feature `store`, on by default) is runtime-free; the `async` charge
@@ -63,6 +72,7 @@ pub mod pricing;
 #[cfg(feature = "ratelimit")]
 #[cfg_attr(docsrs, doc(cfg(feature = "ratelimit")))]
 pub mod ratelimit;
+pub mod semconv;
 #[cfg(feature = "rig")]
 #[cfg_attr(docsrs, doc(cfg(feature = "rig")))]
 pub mod rig;
@@ -78,8 +88,8 @@ pub mod tower_layer;
 pub mod usage;
 
 pub use budget::{
-    AgentBudget, AgentBudgetBuilder, AuditLog, BudgetEnvelope, BudgetSnapshot, ChargeContext, ChargeOutcome,
-    ChargeReceipt, Reservation, SpendRecord,
+    AgentBudget, AgentBudgetBuilder, AuditLog, BudgetEnvelope, BudgetScope, BudgetSnapshot, ChargeContext,
+    ChargeOutcome, ChargeReceipt, Limit, Reservation, ScopeGuard, ScopeReceipt, SpendRecord,
 };
 pub use error::BudgetError;
 pub use fleet::{FleetAllocator, FleetBudget};
@@ -87,5 +97,5 @@ pub use model::{ModelCascade, ModelTier};
 #[cfg(feature = "store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "store")))]
 pub use persistence::BudgetStore;
-pub use pricing::{ModelPrice, PriceTable};
+pub use pricing::{ModelPrice, PriceAction, PriceStatus, PriceTable, UnpricedPolicy};
 pub use usage::Usage;

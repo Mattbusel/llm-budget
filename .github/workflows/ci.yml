@@ -30,6 +30,7 @@ jobs:
         run: |
           cargo run --example rig_budget_hook --features __rig-test-utils
           cargo run --example rig_tracing_cost --features tracing-layer,__rig-test-utils
+          cargo run --example rig_scopes --features __rig-test-utils
       - name: No default features (no async runtime)
         run: cargo test --no-default-features
       - name: Integration examples
@@ -39,6 +40,7 @@ jobs:
           cargo run --example async_openai_budget --features async-openai
           cargo run --example genai_budget --features genai
           cargo run --example tower_budget --features tower
+          cargo run --example fanout
 
   # The oldest Rust this crate promises (rust-version in Cargo.toml). Every
   # feature except `rig`, which needs Rust 1.95+ (rig-agent's own minimum), and
