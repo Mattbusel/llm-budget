@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.6.0] - 2026-11-16
+
+A hard USD cap as a tower `Layer`, for any client or proxy built on tower services.
+
+### Added
+- Feature `tower`, module `tower_layer`:
+  - `BudgetLayer` / `BudgetService`: before each call, an estimator reads the request (model plus expected usage) and takes a `reserve_for` hold. A call that does not fit under the cap, or after the kill switch, fails with `BudgetLayerError::Refused` and the inner service is never called. On success the provider's reported usage is booked (`settle_usage`); with no usage in the response the estimate is booked; when the inner service fails the hold is released and nothing is booked.
+  - `BudgetLayer::openai_http(budget)`: estimator and usage reader for OpenAI-compatible `http::Request<Bytes>` / `http::Response<Bytes>` calls (Chat Completions and Responses API bodies; Anthropic and Gemini usage shapes are read too). `estimate_openai_body` and `read_openai_body` are public for your own layers. `BudgetLayer::new(budget, estimate, read_usage)` takes closures for any request and response types.
+- `examples/tower_budget.rs`: an OpenAI-compatible client capped at $0.02, offline; call 10 is refused before it is sent. CI runs it, and the MSRV job tests the feature on Rust 1.85.
+
 ## [0.5.1] - 2026-11-15
 
 Price the token counters a framework already emits through the metrics facade. A new `metrics-layer` feature adds `metrics_layer::CostLayer`, the metrics twin of 0.5.0's tracing layer, with a preset for swiftide.

@@ -1,6 +1,6 @@
 [package]
 name = "llm-budget"
-version = "0.5.1"
+version = "0.6.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Hard USD spend limits for LLM agents: per-agent and fleet caps, real per-model prices, kill switch, automatic model downgrade"
@@ -39,6 +39,10 @@ metrics = ["dep:metrics"]
 ## `metrics_layer::CostLayer`: a metrics-util layer that prices token counters
 ## (swiftide's, or any model-labelled ones) into a USD metric and an optional budget.
 metrics-layer = ["metrics", "dep:metrics-util"]
+## `tower_layer::BudgetLayer`: a tower Layer that reserves before each call, refuses calls
+## over the cap before they are sent, and settles the provider's reported usage. Includes a
+## ready-made estimator and usage reader for OpenAI-compatible `http` requests.
+tower = ["dep:tower", "dep:http", "dep:bytes"]
 ## JSON Schema for the serialized types (schemars).
 schemars = ["dep:schemars"]
 ## `openai` module and `From<&CompletionUsage>` for async-openai users: settle
@@ -76,6 +80,10 @@ metrics = { version = "0.24", default-features = false, optional = true }
 tracing-subscriber = { version = "0.3.18", default-features = false, features = ["registry", "std"], optional = true }
 # CostLayer for metrics (feature "metrics-layer")
 metrics-util = { version = "0.20", default-features = false, optional = true }
+# BudgetLayer (feature "tower")
+tower = { version = "0.5", default-features = false, optional = true }
+http = { version = "1", optional = true }
+bytes = { version = "1", optional = true }
 # JSON Schema (feature "schemars")
 schemars = { version = "1", optional = true }
 # async-openai interop (feature "async-openai"), types only
@@ -87,6 +95,8 @@ rig-agent = { version = ">=0.44, <0.47", default-features = false, optional = tr
 
 [dev-dependencies]
 tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "net", "io-util"] }
+# service_fn and ServiceExt for the BudgetLayer tests, docs and example
+tower = { version = "0.5", default-features = false, features = ["util"] }
 tempfile = "3.9"
 # examples/genai_budget.rs reads the genai stream
 futures-util = { version = "0.3", default-features = false }
@@ -172,3 +182,11 @@ required-features = ["rig", "__rig-test-utils"]
 [[test]]
 name = "genai_mock"
 required-features = ["genai"]
+
+[[example]]
+name = "tower_budget"
+required-features = ["tower"]
+
+[[test]]
+name = "tower_layer"
+required-features = ["tower"]

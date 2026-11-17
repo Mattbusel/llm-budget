@@ -38,6 +38,7 @@ jobs:
           cargo run --example metrics_cost --features metrics-layer
           cargo run --example async_openai_budget --features async-openai
           cargo run --example genai_budget --features genai
+          cargo run --example tower_budget --features tower
 
   # The oldest Rust this crate promises (rust-version in Cargo.toml). Every
   # feature except `rig`, which needs Rust 1.95+ (rig-agent's own minimum), and
@@ -53,4 +54,4 @@ jobs:
       - name: Test
         run: cargo test
       - name: Test (all features but rig)
-        run: cargo test --features tokens,ratelimit,tracing,tracing-layer,metrics,metrics-layer,schemars,async-openai
+        run: cargo test --features tokens,ratelimit,tracing,tracing-layer,metrics,metrics-layer,schemars,async-openai,tower

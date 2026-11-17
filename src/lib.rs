@@ -72,6 +72,9 @@ pub mod tokens;
 #[cfg(feature = "tracing-layer")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tracing-layer")))]
 pub mod tracing_layer;
+#[cfg(feature = "tower")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tower")))]
+pub mod tower_layer;
 pub mod usage;
 
 pub use budget::{
