@@ -1,0 +1,181 @@
+{
+  "about": "Each case: `context` is canonical JSON both libraries must read and write back unchanged; `baggage` is the exact header the encoder must produce (empty when there is nothing to send down); `baggage_context` is what decoding that header must give.",
+  "cases": [
+    {
+      "name": "full",
+      "context": {
+        "budget": {
+          "cost": {
+            "amount": "0.5",
+            "currency": "USD"
+          },
+          "tokens": {
+            "limit": 5000
+          },
+          "deadline": "2026-08-09T12:00:00Z"
+        },
+        "incurred": {
+          "cost": {
+            "amount": "0.1",
+            "currency": "USD",
+            "source": "provider"
+          },
+          "aggregatedChildCost": {
+            "amount": "0.02",
+            "currency": "USD"
+          },
+          "tokens": {
+            "input": 1200,
+            "output": 340,
+            "cacheRead": 1000,
+            "cacheWrite": 0,
+            "total": 1540
+          },
+          "delegations": 2
+        },
+        "reservation": {
+          "id": "rsv_0123456789abcdef0123456789abcdef",
+          "amount": "0.25",
+          "currency": "USD",
+          "expires": "2026-08-09T11:00:00Z"
+        }
+      },
+      "baggage": "llm.budget.cost.amount=0.5,llm.budget.cost.currency=USD,llm.budget.tokens.limit=5000,llm.budget.deadline=2026-08-09T12:00:00Z,llm.budget.reservation.id=rsv_0123456789abcdef0123456789abcdef,llm.budget.reservation.amount=0.25,llm.budget.reservation.currency=USD,llm.budget.reservation.expires=2026-08-09T11:00:00Z",
+      "baggage_context": {
+        "budget": {
+          "cost": {
+            "amount": "0.5",
+            "currency": "USD"
+          },
+          "tokens": {
+            "limit": 5000
+          },
+          "deadline": "2026-08-09T12:00:00Z"
+        },
+        "reservation": {
+          "id": "rsv_0123456789abcdef0123456789abcdef",
+          "amount": "0.25",
+          "currency": "USD",
+          "expires": "2026-08-09T11:00:00Z"
+        }
+      }
+    },
+    {
+      "name": "one nano-dollar",
+      "context": {
+        "budget": {
+          "cost": {
+            "amount": "0.000000001",
+            "currency": "USD"
+          }
+        }
+      },
+      "baggage": "llm.budget.cost.amount=0.000000001,llm.budget.cost.currency=USD",
+      "baggage_context": {
+        "budget": {
+          "cost": {
+            "amount": "0.000000001",
+            "currency": "USD"
+          }
+        }
+      }
+    },
+    {
+      "name": "large whole amount",
+      "context": {
+        "budget": {
+          "cost": {
+            "amount": "18446744073",
+            "currency": "USD"
+          }
+        }
+      },
+      "baggage": "llm.budget.cost.amount=18446744073,llm.budget.cost.currency=USD",
+      "baggage_context": {
+        "budget": {
+          "cost": {
+            "amount": "18446744073",
+            "currency": "USD"
+          }
+        }
+      }
+    },
+    {
+      "name": "report only, no delegations",
+      "context": {
+        "incurred": {
+          "cost": {
+            "amount": "3",
+            "currency": "USD",
+            "source": "local"
+          },
+          "delegations": 0
+        }
+      },
+      "baggage": "",
+      "baggage_context": null
+    },
+    {
+      "name": "tokens only",
+      "context": {
+        "budget": {
+          "tokens": {
+            "limit": 0
+          }
+        }
+      },
+      "baggage": "llm.budget.tokens.limit=0",
+      "baggage_context": {
+        "budget": {
+          "tokens": {
+            "limit": 0
+          }
+        }
+      }
+    },
+    {
+      "name": "reservation id that needs escaping",
+      "context": {
+        "reservation": {
+          "id": "a b,c;d=é%",
+          "amount": "1.000000009",
+          "currency": "USD"
+        }
+      },
+      "baggage": "llm.budget.reservation.id=a%20b%2Cc%3Bd=%C3%A9%25,llm.budget.reservation.amount=1.000000009,llm.budget.reservation.currency=USD",
+      "baggage_context": {
+        "reservation": {
+          "id": "a b,c;d=é%",
+          "amount": "1.000000009",
+          "currency": "USD"
+        }
+      }
+    },
+    {
+      "name": "another currency",
+      "context": {
+        "budget": {
+          "cost": {
+            "amount": "12.5",
+            "currency": "EUR"
+          }
+        }
+      },
+      "baggage": "llm.budget.cost.amount=12.5,llm.budget.cost.currency=EUR",
+      "baggage_context": {
+        "budget": {
+          "cost": {
+            "amount": "12.5",
+            "currency": "EUR"
+          }
+        }
+      }
+    },
+    {
+      "name": "empty",
+      "context": {},
+      "baggage": "",
+      "baggage_context": null
+    }
+  ]
+}

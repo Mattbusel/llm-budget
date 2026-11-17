@@ -41,6 +41,7 @@ jobs:
           cargo run --example genai_budget --features genai
           cargo run --example tower_budget --features tower
           cargo run --example fanout
+          cargo run --example budget_context
 
   # The oldest Rust this crate promises (rust-version in Cargo.toml). Every
   # feature except `rig`, which needs Rust 1.95+ (rig-agent's own minimum), and

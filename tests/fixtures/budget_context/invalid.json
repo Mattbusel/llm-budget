@@ -1,0 +1,195 @@
+{
+  "about": "Inputs both libraries must reject: an error, never a crash and never a partial result.",
+  "json": [
+    {
+      "budget": {
+        "cost": {
+          "amount": "-1",
+          "currency": "USD"
+        }
+      }
+    },
+    {
+      "budget": {
+        "cost": {
+          "amount": "1e3",
+          "currency": "USD"
+        }
+      }
+    },
+    {
+      "budget": {
+        "cost": {
+          "amount": "0.0000000001",
+          "currency": "USD"
+        }
+      }
+    },
+    {
+      "budget": {
+        "cost": {
+          "amount": "1.",
+          "currency": "USD"
+        }
+      }
+    },
+    {
+      "budget": {
+        "cost": {
+          "amount": ".5",
+          "currency": "USD"
+        }
+      }
+    },
+    {
+      "budget": {
+        "cost": {
+          "amount": " 1",
+          "currency": "USD"
+        }
+      }
+    },
+    {
+      "budget": {
+        "cost": {
+          "amount": "١",
+          "currency": "USD"
+        }
+      }
+    },
+    {
+      "budget": {
+        "cost": {
+          "amount": "18446744074",
+          "currency": "USD"
+        }
+      }
+    },
+    {
+      "budget": {
+        "cost": {
+          "amount": -1,
+          "currency": "USD"
+        }
+      }
+    },
+    {
+      "budget": {
+        "cost": {
+          "amount": true,
+          "currency": "USD"
+        }
+      }
+    },
+    {
+      "budget": {
+        "cost": {
+          "amount": "1",
+          "currency": "usd"
+        }
+      }
+    },
+    {
+      "budget": {
+        "cost": {
+          "amount": "1"
+        }
+      }
+    },
+    {
+      "budget": {
+        "cost": {
+          "currency": "USD"
+        }
+      }
+    },
+    {
+      "budget": {
+        "tokens": {
+          "limit": -5
+        }
+      }
+    },
+    {
+      "budget": {
+        "tokens": {
+          "limit": 1.5
+        }
+      }
+    },
+    {
+      "budget": {
+        "deadline": ""
+      }
+    },
+    {
+      "budget": "x"
+    },
+    {
+      "incurred": {
+        "cost": {
+          "amount": "1",
+          "currency": "USD",
+          "source": "estimate"
+        }
+      }
+    },
+    {
+      "incurred": {
+        "delegations": 1.5
+      }
+    },
+    {
+      "reservation": {
+        "id": "",
+        "amount": "1",
+        "currency": "USD"
+      }
+    },
+    {
+      "reservation": {
+        "amount": "1",
+        "currency": "USD"
+      }
+    },
+    [],
+    {
+      "budget": []
+    },
+    {
+      "budget": {
+        "cost": [
+          1,
+          "USD"
+        ]
+      }
+    },
+    {
+      "incurred": {
+        "tokens": []
+      }
+    },
+    {
+      "reservation": [
+        "r",
+        "1",
+        "USD"
+      ]
+    }
+  ],
+  "baggage": [
+    "llm.budget.cost.amount=1",
+    "llm.budget.cost.currency=USD",
+    "llm.budget.cost.amount=1,llm.budget.cost.currency=USD,llm.budget.cost.amount=2",
+    "llm.budget.cost.amount=1%2,llm.budget.cost.currency=USD",
+    "llm.budget.cost.amount=1 2,llm.budget.cost.currency=USD",
+    "llm.budget.cost.amount=%FF,llm.budget.cost.currency=USD",
+    "llm.budget.cost.amount=1,llm.budget.cost.currency=US",
+    "llm.budget.cost.amount=-1,llm.budget.cost.currency=USD",
+    "llm.budget.tokens.limit=abc",
+    "llm.budget.tokens.limit=-1",
+    "llm.budget.reservation.amount=1,llm.budget.reservation.currency=USD",
+    "llm.budget.reservation.id=,llm.budget.reservation.amount=1,llm.budget.reservation.currency=USD",
+    "llm.budget.reservation.id=x,llm.budget.reservation.amount=1"
+  ]
+}

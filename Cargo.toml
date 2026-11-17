@@ -1,6 +1,6 @@
 [package]
 name = "llm-budget"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Hard USD spend limits for LLM agents: per-agent and fleet caps, child scopes for parallel sub-agents, real per-model prices, kill switch, automatic model downgrade"
@@ -190,6 +190,10 @@ required-features = ["tower"]
 # Four parallel sub-agents under one cap, offline: cargo run --example fanout
 [[example]]
 name = "fanout"
+
+# A budget carried over A2A metadata and MCP _meta baggage, offline.
+[[example]]
+name = "budget_context"
 
 # A rig orchestrator with two sub-agents in child scopes, offline.
 # cargo run --example rig_scopes --features __rig-test-utils

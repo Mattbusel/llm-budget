@@ -154,3 +154,69 @@ let parent = AgentBudget::builder("orchestrator", 1.00).unpriced_policy(policy).
 
 Without a policy nothing changes from 0.6: an unpriced model is refused
 with `BudgetError::UnknownModel`.
+
+## Across process boundaries (0.8)
+
+A child scope works inside one process. When the sub-agent is a remote A2A
+agent or an MCP tool server, `llm_budget::context` carries the slice to it
+and the cost back:
+
+```rust
+use llm_budget::context::{a2a, mcp, BudgetContext, IncurredBooker};
+
+// Caller: reserve a slice and send it with the A2A message.
+let slice = parent.child("remote-researcher", Limit::Usd(0.30))?;
+let metadata = a2a::to_metadata(&BudgetContext::outbound(&slice))?;
+
+// Callee: a budget of exactly what it was given.
+let ctx = a2a::from_metadata(&metadata)?.expect("budget extension present");
+let agent = AgentBudget::from_context("researcher", &ctx)?;
+
+// Callee to an MCP tool: the same budget as W3C baggage in params._meta.
+let mut meta = serde_json::Map::new();
+mcp::inject(&mut meta, &BudgetContext::outbound(&tool_slice));
+
+// Callee reports back in the task metadata; caller books it once.
+let report = a2a::to_metadata(&BudgetContext::reporting(&agent))?;
+let mut booker = IncurredBooker::new();
+booker.book(&slice, a2a::from_metadata(&report)?.and_then(|c| c.incurred).as_ref());
+```
+
+The wire format, under the extension URI
+`https://a2a-protocol.org/extensions/budget/v1`:
+
+```json
+{
+  "budget": {"cost": {"amount": "0.3", "currency": "USD"}, "tokens": {"limit": 5000}, "deadline": "2026-12-01T00:00:00Z"},
+  "reservation": {"id": "rsv_a2dcda7352c5fe3c882a05e2b66a162a", "amount": "0.3", "currency": "USD"},
+  "incurred": {
+    "cost": {"amount": "0.04", "currency": "USD", "source": "local"},
+    "aggregatedChildCost": {"amount": "0.02", "currency": "USD"},
+    "tokens": {"input": 1200, "output": 340},
+    "delegations": 1
+  }
+}
+```
+
+- `budget` and `incurred` use the field names of the A2A draft
+  ([a2aproject/A2A#2121](https://github.com/a2aproject/A2A/issues/2121)).
+  The draft is not final: its author has said amounts will be decimal
+  strings (done here), that `aggregatedChildCost` is a provisional name, and
+  that token counts gain cache fields. This crate follows the draft in minor
+  releases and keeps reading what it wrote before.
+- `reservation` is this crate's addition: the slice the parent reserved,
+  with an id unique to that reservation. The id is never shared between
+  siblings, so a callee cannot tell how many siblings it has.
+- In baggage the outbound half becomes `llm.budget.cost.amount`,
+  `llm.budget.cost.currency`, `llm.budget.tokens.limit`,
+  `llm.budget.deadline`, `llm.budget.reservation.id`, `.amount`,
+  `.currency` and `.expires`. MCP reserves the `baggage` key of `_meta` for
+  W3C baggage (SEP-414), so no MCP change is needed.
+- Absent is not zero: anything a reporter did not measure is left out.
+- `incurred` is cumulative in a stream; `IncurredBooker` books only growth.
+
+The Python package [agent-budget](https://pypi.org/project/agent-budget/)
+implements the same contexts, the same reserve/settle scopes, and an
+a2a-python plugin that does all of the above on both sides of an A2A call.
+Both libraries' tests read the fixtures in `tests/fixtures/budget_context/`.
+Run the whole flow offline with `cargo run --example budget_context`.

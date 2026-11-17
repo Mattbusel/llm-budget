@@ -1,0 +1,197 @@
+{
+  "about": "Each case: reading `input` must give the canonical `context`. JSON inputs come from A2A metadata; baggage inputs from a header.",
+  "json": [
+    {
+      "name": "JSON number amounts (first draft, protobuf Struct)",
+      "input": {
+        "budget": {
+          "cost": {
+            "amount": 0.5,
+            "currency": "USD"
+          }
+        }
+      },
+      "context": {
+        "budget": {
+          "cost": {
+            "amount": "0.5",
+            "currency": "USD"
+          }
+        }
+      }
+    },
+    {
+      "name": "whole-number amount",
+      "input": {
+        "budget": {
+          "cost": {
+            "amount": 2,
+            "currency": "USD"
+          }
+        }
+      },
+      "context": {
+        "budget": {
+          "cost": {
+            "amount": "2",
+            "currency": "USD"
+          }
+        }
+      }
+    },
+    {
+      "name": "counts as whole floats, snake_case token keys",
+      "input": {
+        "incurred": {
+          "tokens": {
+            "input": 1200.0,
+            "cache_read": 5,
+            "cache_write": 1.0
+          },
+          "delegations": 3.0
+        }
+      },
+      "context": {
+        "incurred": {
+          "tokens": {
+            "input": 1200,
+            "cacheRead": 5,
+            "cacheWrite": 1
+          },
+          "delegations": 3
+        }
+      }
+    },
+    {
+      "name": "unknown keys are ignored",
+      "input": {
+        "budget": {
+          "cost": {
+            "amount": "1.50",
+            "currency": "USD",
+            "x": 1
+          },
+          "y": [
+            1
+          ]
+        },
+        "future": true
+      },
+      "context": {
+        "budget": {
+          "cost": {
+            "amount": "1.5",
+            "currency": "USD"
+          }
+        }
+      }
+    },
+    {
+      "name": "leading and trailing zeros",
+      "input": {
+        "reservation": {
+          "id": "r",
+          "amount": "0010.100",
+          "currency": "USD"
+        }
+      },
+      "context": {
+        "reservation": {
+          "id": "r",
+          "amount": "10.1",
+          "currency": "USD"
+        }
+      }
+    },
+    {
+      "name": "nulls read as absent",
+      "input": {
+        "budget": null,
+        "incurred": {
+          "cost": null,
+          "tokens": {
+            "input": null
+          }
+        }
+      },
+      "context": {
+        "incurred": {
+          "tokens": {}
+        }
+      }
+    },
+    {
+      "name": "an empty token limit stays an empty object",
+      "input": {
+        "budget": {
+          "tokens": {
+            "limit": null
+          }
+        }
+      },
+      "context": {
+        "budget": {
+          "tokens": {}
+        }
+      }
+    }
+  ],
+  "baggage": [
+    {
+      "name": "other members, whitespace and properties",
+      "input": " foo=bar , llm.budget.cost.amount = 2 ;prop=1, llm.budget.cost.currency=USD,baz",
+      "context": {
+        "budget": {
+          "cost": {
+            "amount": "2",
+            "currency": "USD"
+          }
+        }
+      }
+    },
+    {
+      "name": "no budget members",
+      "input": "foo=bar,traceid=abc",
+      "context": null
+    },
+    {
+      "name": "unknown llm.budget keys are ignored",
+      "input": "llm.budget.future=1,llm.budget.tokens.limit=7",
+      "context": {
+        "budget": {
+          "tokens": {
+            "limit": 7
+          }
+        }
+      }
+    },
+    {
+      "name": "empty deadline and expires read as absent",
+      "input": "llm.budget.cost.amount=1,llm.budget.cost.currency=USD,llm.budget.deadline=,llm.budget.reservation.id=r,llm.budget.reservation.amount=1,llm.budget.reservation.currency=USD,llm.budget.reservation.expires=",
+      "context": {
+        "budget": {
+          "cost": {
+            "amount": "1",
+            "currency": "USD"
+          }
+        },
+        "reservation": {
+          "id": "r",
+          "amount": "1",
+          "currency": "USD"
+        }
+      }
+    },
+    {
+      "name": "lower-case escapes",
+      "input": "llm.budget.reservation.id=x%2cy,llm.budget.reservation.amount=1,llm.budget.reservation.currency=USD",
+      "context": {
+        "reservation": {
+          "id": "x,y",
+          "amount": "1",
+          "currency": "USD"
+        }
+      }
+    }
+  ]
+}

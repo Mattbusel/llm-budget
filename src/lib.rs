@@ -21,6 +21,9 @@
 //!   ancestors at once, and closing its [`ScopeGuard`] refunds the rest, so
 //!   parallel children can never be admitted for more than the parent has
 //!   left. See [`budget::scope`].
+//! - **Across processes**: [`context::BudgetContext`] carries a slice down
+//!   to a remote agent or tool (A2A metadata, W3C baggage, MCP `_meta`) and
+//!   its cost back up, in the shape of the A2A budget extension draft.
 //! - **Models with no price**: [`UnpricedPolicy`] picks a [`PriceAction`]
 //!   for each [`PriceStatus`] (`Unpriced`, `Missing`, `NoCatalog`).
 //! - **Fleets**: [`FleetAllocator`] splits one total into per-agent caps.
@@ -52,6 +55,7 @@
 #![warn(missing_docs)]
 
 pub mod budget;
+pub mod context;
 pub mod error;
 pub mod fleet;
 #[cfg(feature = "metrics-layer")]

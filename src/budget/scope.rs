@@ -259,6 +259,7 @@ impl AgentBudget {
             crate::observe::refused(&self.agent_id, false, &e.to_string());
             return Err(e);
         }
+        self.envelope.delegations.fetch_add(1, Ordering::SeqCst);
         let audit = lock(&self.envelope.log).mode;
         let link = Arc::new(ParentLink { parent: self.envelope.clone(), hold: AtomicU64::new(nanos) });
         let envelope = BudgetEnvelope::with_atomic(
@@ -290,6 +291,31 @@ impl AgentBudget {
         self.max_depth
     }
 
+    /// How many child scopes were created directly under this one (the A2A
+    /// draft's `incurred.delegations`).
+    pub fn delegations(&self) -> u64 {
+        self.envelope.delegations.load(Ordering::SeqCst)
+    }
+
+    /// What is left to spend or reserve, in nano-dollars.
+    pub(crate) fn remaining_nanos(&self) -> u64 {
+        let a = self.envelope.atomic();
+        a.limit_nanos().saturating_sub(a.committed_nanos())
+    }
+
+    /// [`own_cost_usd`](Self::own_cost_usd) in nano-dollars.
+    pub(crate) fn own_cost_nanos(&self) -> u64 {
+        let a = self.envelope.atomic();
+        a.committed_nanos()
+            .saturating_sub(a.reserved_nanos())
+            .saturating_sub(self.envelope.child_nanos.load(Ordering::SeqCst))
+    }
+
+    /// [`child_cost_usd`](Self::child_cost_usd) in nano-dollars.
+    pub(crate) fn child_cost_nanos(&self) -> u64 {
+        self.envelope.child_nanos.load(Ordering::SeqCst)
+    }
+
     /// The parent scope's name, for a child scope.
     pub fn parent_id(&self) -> Option<&str> {
         self.envelope.parent.as_ref().map(|l| l.parent().scope_id.as_str())
@@ -304,8 +330,7 @@ impl AgentBudget {
     /// The part of [`spent_usd`](Self::spent_usd) booked by this scope's own
     /// calls, not its descendants'.
     pub fn own_cost_usd(&self) -> f64 {
-        let spent = self.envelope.atomic().committed_nanos().saturating_sub(self.envelope.atomic().reserved_nanos());
-        nanos_to_usd(spent.saturating_sub(self.envelope.child_nanos.load(Ordering::SeqCst)))
+        nanos_to_usd(self.own_cost_nanos())
     }
 
     /// True once this child scope was settled or dropped.
@@ -323,6 +348,11 @@ impl ScopeGuard {
     /// What the scope reserved from its parent, in USD.
     pub fn held_usd(&self) -> f64 {
         nanos_to_usd(self.held_nanos)
+    }
+
+    /// [`held_usd`](Self::held_usd) in nano-dollars.
+    pub(crate) fn held_nanos(&self) -> u64 {
+        self.held_nanos
     }
 
     /// Close the scope: it admits nothing new, and the part of its hold that

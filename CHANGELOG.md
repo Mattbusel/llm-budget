@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.8.0] - 2026-11-17
+
+Budgets that cross process boundaries. A `BudgetContext` in the shape of the A2A budget extension draft travels in A2A metadata, W3C baggage and MCP `_meta`, so a remote agent or tool server gets exactly the slice its caller reserved and reports back what it spent. The Python package [agent-budget](https://pypi.org/project/agent-budget/) 0.1.0 speaks the same format; both test suites read the same golden fixtures.
+
+### Added
+- Module `context`:
+  - `BudgetContext { budget, incurred, reservation }` with the draft's field names (a2aproject/A2A#2121): `budget{cost, tokens{limit}, deadline}`, `incurred{cost{amount, currency, source}, aggregatedChildCost, tokens{input, output, cacheRead, cacheWrite, total}, delegations}`, and an optional `reservation{id, amount, currency, expires}` for the slice a parent reserved. Money is a decimal string on the wire (`Amount`, exact to the nano-unit); JSON numbers and whole floats (protobuf `Struct`) are read too. Absent fields stay absent, never zero. `from_json` rejects malformed known fields and ignores unknown ones.
+  - `BudgetContext::outbound(&scope)` (what a child scope has left plus its reservation, with a fresh `rsv_` id per reservation), `remaining(&budget)`, `reporting(&budget)` and `Incurred::of(&budget, source)` (own cost, `aggregatedChildCost` from child scopes, `delegations`), `with_deadline`, `with_token_limit`, `budget_usd`. `AgentBudget::from_context(id, &ctx)` builds a callee budget capped at what it was given. `AgentBudget::delegations()`.
+  - `IncurredBooker` books a callee's cumulative `incurred` report on the caller's scope once, however many times it arrives.
+  - Carriers: `a2a::{EXTENSION_URI, to_metadata, insert, from_metadata}`; `baggage::{encode, decode, merge, members}` with `llm.budget.*` keys, W3C percent-encoding and the 8,192-byte limit; `mcp::{inject, extract}` for `params._meta.baggage` (reserved for W3C baggage by MCP SEP-414).
+- Golden fixtures in `tests/fixtures/budget_context/` (round trips, normalization, inputs both libraries must reject), shared with agent-budget; `tests/context_fixtures.rs` runs them and fuzzes the untrusted readers (proptest: `baggage::decode` and `from_json` never panic, every valid outbound context round-trips through JSON and baggage, amounts print and parse back exactly).
+- `examples/budget_context.rs`: an orchestrator, a remote A2A agent and an MCP tool server passing one budget down and the cost back up, offline. CI runs it.
+
 ## [0.7.0] - 2026-11-17
 
 Budget scopes for agents that delegate: a parent reserves a slice for each sub-agent, the children of a delegation together can never be admitted for more than the parent has left, and unused slices are refunded. Plus a typed policy for models with no price, and the proposed OpenTelemetry cost attribute names in `CostLayer`. Guide: `docs/budget-scopes.md`.

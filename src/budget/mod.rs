@@ -502,6 +502,8 @@ pub struct BudgetEnvelope {
     closed: Arc<AtomicBool>,
     /// Spend booked here that was forwarded from descendant scopes, in nanos.
     child_nanos: Arc<AtomicU64>,
+    /// Child scopes created directly under this one.
+    delegations: Arc<AtomicU64>,
 }
 
 /// The kind of thing a [`BudgetEnvelope`] limits.
@@ -543,6 +545,7 @@ impl BudgetEnvelope {
             parent,
             closed: Arc::new(AtomicBool::new(false)),
             child_nanos: Arc::new(AtomicU64::new(0)),
+            delegations: Arc::new(AtomicU64::new(0)),
         }
     }
 
