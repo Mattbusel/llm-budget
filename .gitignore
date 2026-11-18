@@ -2,3 +2,4 @@
 Cargo.lock
 *.budget.json
 *.budget.json.tmp
+target/

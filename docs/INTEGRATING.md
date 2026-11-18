@@ -23,7 +23,7 @@ run by `tests/api_surface.rs` and the examples in CI.
 ```toml
 [dependencies]
 # Smallest build: budgets, prices, reserve/settle, scopes, context carriers. No tokio.
-llm-budget = { version = "0.8", default-features = false }
+llm-budget = { version = "0.9", default-features = false }
 ```
 
 Without default features the crate pulls in serde, serde_json, thiserror,
@@ -40,6 +40,7 @@ behind a feature:
 | `async-openai` | no | `openai`: reserve from a request, settle from a response or stream's last chunk | async-openai (types only) |
 | `genai` | no | `genai::exec_chat` / `exec_chat_stream` under a hold | genai |
 | `rig` | no | `rig::BudgetHook` for rig-agent 0.44 to 0.46 | rig-agent (no default features) |
+| `borg` | no | `borg_adapter!`: borg budgets priced per model, in reference-model tokens ([borg.md](borg.md)) | async-trait |
 | `tokens` | no | token counts from text (OpenAI tokenizers) | tiktoken-rs |
 | `ratelimit` | no | tokens- and requests-per-minute limits | governor |
 | `tracing`, `metrics` | no | events and counters for every charge, refusal, downgrade and kill | tracing / metrics |
@@ -51,7 +52,7 @@ If your users should opt in, put it behind a feature of your own:
 
 ```toml
 [dependencies]
-llm-budget = { version = "0.8", default-features = false, optional = true }
+llm-budget = { version = "0.9", default-features = false, optional = true }
 
 [features]
 budget = ["dep:llm-budget"]
@@ -89,6 +90,7 @@ hold.settle_usage("gpt-4o", &usage);                                        // b
 | `metrics` token counters | `metrics_layer::CostLayer` around your recorder | `examples/metrics_cost.rs` |
 | rig agents | `rig::BudgetHook::new(budget, "gpt-4o")` via `add_hook` | `examples/rig_budget_hook.rs` |
 | genai | `genai::exec_chat(&client, &budget, model, req, opts)` | `examples/genai_budget.rs` |
+| borg compositions | `llm_budget::borg_adapter!()`, then `PricedLlm` + `PricedBudget` in the `ExecCtx` | [borg.md](borg.md), `integrations/borg` |
 | async-openai | `openai::reserve_request` / `openai::settle_response` | `examples/async_openai_budget.rs` |
 | Sub-agents in parallel | `parent.child(id, Limit::Usd(x) or Limit::Fraction(f))` | `examples/fanout.rs`, [budget-scopes.md](budget-scopes.md) |
 | Remote agents or MCP tools | `context::BudgetContext::outbound(&scope)` over `a2a`, `baggage` or `mcp` carriers; callee: `AgentBudget::from_context` | `examples/budget_context.rs` |

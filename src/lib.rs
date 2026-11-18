@@ -33,6 +33,10 @@
 //!   for provider usage blocks with prompt-cache counts.
 //! - **rig agents** (feature `rig`): `rig::BudgetHook`, with a comparison to
 //!   rig's own token-count budget example in its module docs.
+//! - **borg agents** (feature `borg`): [`borg_adapter!`] writes a borg
+//!   `Budget` and `AgentLlmClient` pair into your crate that prices every call
+//!   on the model it used, in reference-model tokens, so parallel admission
+//!   and `SubBudget` keep working. See `borg`.
 //! - **genai** (feature `genai`): `genai::exec_chat` and
 //!   `genai::exec_chat_stream` run a genai `Client` call under a hold.
 //! - **metrics** (feature `metrics-layer`): `metrics_layer::CostLayer` wraps
@@ -56,6 +60,9 @@
 #![warn(missing_docs)]
 
 pub mod budget;
+#[cfg(feature = "borg")]
+#[cfg_attr(docsrs, doc(cfg(feature = "borg")))]
+pub mod borg;
 pub mod context;
 pub mod error;
 pub mod fleet;

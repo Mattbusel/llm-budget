@@ -20,6 +20,7 @@ test:
     - cargo build --all-features
     - cargo test --all-features
     - cargo test --no-default-features
+    - cargo test --manifest-path integrations/borg/Cargo.toml
     - cargo clippy --all-targets --all-features -- -D warnings
     - RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
     - cargo run --example quickstart

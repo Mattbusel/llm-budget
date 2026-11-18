@@ -1,0 +1,19 @@
+# Tests llm-budget's `borg` feature against real borg. Not published, and not
+# part of the llm-budget package: borg ships from GitHub only, so it cannot be a
+# dependency (or a published dev-dependency) of a crate on crates.io.
+#   cargo test --manifest-path integrations/borg/Cargo.toml
+[package]
+name = "llm-budget-borg-check"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+borg = { git = "https://github.com/joydle/borg", tag = "v1.0.0" }
+llm-budget = { path = "../..", default-features = false, features = ["borg"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+async-trait = "0.1"

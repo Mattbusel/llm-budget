@@ -109,6 +109,7 @@ It makes no HTTP calls, so it works next to any client:
   ```
   Share one `Arc<AgentBudget>` for a common cap. `rig` needs Rust 1.95. The rest keeps MSRV 1.85.
 - **Any client or framework**: reserve before the call with `AgentBudget::reserve_for(model, &estimate)`, then `Reservation::settle_usage(model, &usage)` with what the provider reported. Build the `Usage` with `Usage::from_parts(uncached, cache_read, cache_write, output)`, or pass the raw response body to `Usage::from_json` (OpenAI, Anthropic and Gemini formats). `AgentBudget::record(model, &usage)` books a finished call that had no reservation. See `examples/record_usage.rs` and `examples/provider_usage.rs`.
+- **borg** (feature `borg`): `llm_budget::borg_adapter!()` writes `PricedBudget` and `PricedLlm` into your crate. Every call in a borg composition is charged on the model it used, in tokens of a reference model, so parallel admission and `SubBudget` keep working. See [borg.md](borg.md).
 - **genai** (feature `genai`): `llm_budget::genai::exec_chat(&client, &budget, model, request, options)` reserves, calls and settles in one step; `exec_chat_stream` plus `settle_stream_end` do the same for streams. See `examples/genai_budget.rs`.
 - **async-openai** (feature `async-openai`): `openai::reserve_request` before `client.chat().create(..)`, `openai::settle_response` after it. For streams, `openai::include_usage` on the request and `openai::StreamUsage` over the chunks. See `examples/async_openai_budget.rs`.
 - **tracing / OpenTelemetry GenAI spans** (feature `tracing-layer`): add `tracing_layer::CostLayer` to your subscriber and every span that carries `gen_ai.usage.*` fields (rig records them on each model call) is priced with llm-prices when it closes. The layer emits `gen_ai.usage.cost.amount`, `.currency` and `.source` inside the span (the names proposed for the OpenTelemetry GenAI conventions; before 0.7 it was `gen_ai.usage.cost`), keeps running totals, and with `.budget(budget)` books the spend and kills the budget once it is over the cap. The traced code does not change. Add it before a `tracing-opentelemetry` layer and the cost is exported with the span:
@@ -141,6 +142,7 @@ It makes no HTTP calls, so it works next to any client:
 | `async-openai` | no | `openai` module: reserve from a `CreateChatCompletionRequest`, settle from a `CreateChatCompletionResponse` or a stream's final usage chunk; `From<&CompletionUsage> for Usage` | [async-openai](https://crates.io/crates/async-openai) types only (no HTTP client) |
 | `genai` | no | `genai` module: `exec_chat` and `exec_chat_stream` run a genai `Client` call under a reserve/settle hold; `From<&genai Usage> for Usage` | [genai](https://crates.io/crates/genai) |
 | `rig` | no | `rig::BudgetHook`, an `AgentHook` for rig-agent 0.44 to 0.46 that charges every model turn and stops the run at the cap, and `From<&rig Usage> for Usage`. Needs Rust 1.95 | [rig-agent](https://crates.io/crates/rig-agent) (no default features) |
+| `borg` | no | `borg::BorgPricing` and `borg_adapter!`: borg (joydle/borg) budgets priced per model, in reference-model tokens. llm-budget does not depend on borg; the macro compiles against yours. See [borg.md](borg.md) | [async-trait](https://crates.io/crates/async-trait) |
 | `schemars` | no | JSON Schema for `SpendRecord`, `BudgetSnapshot`, `ChargeReceipt` and the saved state, for non-Rust readers of those files | [schemars](https://crates.io/crates/schemars) |
 
 ## Examples
@@ -208,6 +210,7 @@ Then give it to an agent with `AgentBudget::builder("a", 10.0).price_table(table
 | `src/fleet/mod.rs` | `FleetBudget`, `FleetAllocator` |
 | `src/persistence/mod.rs` | `BudgetStore` |
 | `src/error.rs` | `BudgetError` |
+| `src/borg.rs` | `BorgPricing`, `borg_adapter!` (feature `borg`) |
 
 ## Performance
 

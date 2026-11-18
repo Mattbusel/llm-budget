@@ -31,6 +31,8 @@ jobs:
           cargo run --example rig_budget_hook --features __rig-test-utils
           cargo run --example rig_tracing_cost --features tracing-layer,__rig-test-utils
           cargo run --example rig_scopes --features __rig-test-utils
+      - name: borg adapter against real borg
+        run: cargo test --manifest-path integrations/borg/Cargo.toml
       - name: No default features (no async runtime)
         run: cargo test --no-default-features
       - name: Integration examples
@@ -57,7 +59,7 @@ jobs:
       - name: Test
         run: cargo test
       - name: Test (all features but rig)
-        run: cargo test --features tokens,ratelimit,tracing,tracing-layer,metrics,metrics-layer,schemars,async-openai,tower
+        run: cargo test --features tokens,ratelimit,tracing,tracing-layer,metrics,metrics-layer,schemars,async-openai,tower,borg
 
   # Patch releases must not break code that compiles (docs/INTEGRATING.md,
   # "Stability"): compare the public API with the latest release on crates.io.

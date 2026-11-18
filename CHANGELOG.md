@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.9.0] - 2026-11-18
+
+### Added
+- Feature `borg`: budgets for [borg](https://github.com/joydle/borg) compositions priced per model. Guide: `docs/borg.md`.
+  - `borg::BorgPricing`: charges each call in *reference-model tokens*, the number of tokens of one chosen model that cost the same at the call's own input/output mix. A reference-model call with no cache hits is charged exactly its tokens; a model 15x the price is charged 15x; cache reads and writes are priced at the model's cache prices. borg's limits, `admit_parallel(n, 1_000)`, `BudgetExhausted` and `SubBudget` stay in tokens and keep their meaning. The price table is shared behind an `Arc` (`with_table`) or the built-in one is used without a copy (`new`). `units(model, &usage)`, `spent_usd()`, `unpriced_calls()`, `unattributed_calls()`, `unpriced_ratio(x)`.
+  - `borg_adapter!()`: writes `PricedBudget` (a borg `Budget` over any inner budget: `in_memory`, `sub`, `shared`) and `PricedLlm` (a borg `AgentLlmClient` that notes each call's model) into the calling crate. borg ships from GitHub only, so llm-budget does not depend on it; the macro compiles against the borg the caller already uses and exposes no llm-budget types through borg's traits.
+  - Per-call models without a trait change: borg's default `BorgAgent::invoke` calls the model and then `record_usage` in the same poll, so `PricedLlm` leaves a per-thread note on the shared `BorgPricing` and `PricedBudget` takes it, matched on the exact usage. A charge with no note is priced as the reference model and counted. No process-wide state.
+- `integrations/borg`: a test crate (not published) running the adapter inside real borg v1.0.0 compositions: a mixed-model sequential + parallel tree, 64 parallel branches on two models across 8 threads, parallel admission degrading in tokens, sub-budgets exhausted by price, nested pools. CI runs it.
+
 ## [0.8.2] - 2026-11-17
 
 For projects deciding whether to depend on this crate. No API changes.

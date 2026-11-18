@@ -1,6 +1,6 @@
 [package]
 name = "llm-budget"
-version = "0.8.2"
+version = "0.9.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Hard USD spend limits for LLM agents: per-agent and fleet caps, child scopes for parallel sub-agents, real per-model prices, kill switch, automatic model downgrade"
@@ -55,6 +55,9 @@ genai = ["dep:genai"]
 ## `rig::BudgetHook`, a dollar cap for rig agents (rig-agent 0.44 to 0.46; needs
 ## Rust 1.95 for rig-agent 0.44, 1.97.1 for 0.46).
 rig = ["dep:rig-agent"]
+## `borg::BorgPricing` and the `borg_adapter!` macro: borg (joydle/borg) budgets
+## priced per model, in reference-model tokens. Does not depend on borg itself.
+borg = ["dep:async-trait"]
 ## Internal: rig's mock models for this crate's rig tests and example. Not part
 ## of the public API and not covered by semver.
 __rig-test-utils = ["rig", "rig-agent/test-utils"]
@@ -90,6 +93,8 @@ schemars = { version = "1", optional = true }
 async-openai = { version = "0.42", default-features = false, features = ["chat-completion-types"], optional = true }
 # genai integration (feature "genai")
 genai = { version = "0.7", optional = true }
+# the borg_adapter! macro's AgentLlmClient impl (feature "borg")
+async-trait = { version = "0.1", optional = true }
 # rig agent hook (feature "rig")
 rig-agent = { version = ">=0.44, <0.47", default-features = false, optional = true }
 
