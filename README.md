@@ -42,4 +42,6 @@ async fn main() -> Result<(), BudgetError> {
 
 More: [docs/DETAILS.md](https://github.com/Mattbusel/llm-budget/blob/main/docs/DETAILS.md)
 
+Adding it to another project (features, MSRV, stability, the five-line integration): [docs/INTEGRATING.md](https://github.com/Mattbusel/llm-budget/blob/main/docs/INTEGRATING.md)
+
 MIT license, see [LICENSE](https://github.com/Mattbusel/llm-budget/blob/main/LICENSE).

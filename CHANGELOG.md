@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.8.2] - 2026-11-17
+
+For projects deciding whether to depend on this crate. No API changes.
+
+### Added
+- `docs/INTEGRATING.md`: the integration surface in one page. License, MSRV, no unsafe, no panics, no network or globals, what `default-features = false` pulls in, every feature with its dependencies, how to make llm-budget an optional dependency of your own crate, the five-line reserve/settle integration, which entry point fits which stack (any client, tower, tracing, metrics, rig, genai, async-openai, sub-agents, A2A/MCP), price overrides, and the stability policy.
+- `tests/api_surface.rs`: compile-time checks that every shared type (`AgentBudget`, `Reservation`, `ScopeGuard`, `FleetAllocator`, `PriceTable`, `BudgetError`, `BudgetContext`, receipts and records) is `Send + Sync + 'static`, that `BudgetError` boxes into `Box<dyn Error + Send + Sync>`, and that the five-line integration from the docs runs without default features.
+- CI job `semver`: cargo-semver-checks compares the public API with the latest crates.io release.
+- `#![forbid(unsafe_code)]` (there was no unsafe code; now it cannot be added by accident).
+
+### Changed
+- thiserror 1 to 2 and dashmap 5 to 6. Neither appears in the public API. Projects already on thiserror 2 (rig 0.46, most of the current ecosystem) no longer compile two copies of it: with every feature on, the tree had both thiserror 1.0.69 and 2.0.21; now it has one.
+- `docs/DETAILS.md`: the features table lists `metrics-layer` and `tower`, and `rig` covers rig-agent 0.44 to 0.46.
+
 ## [0.8.1] - 2026-11-17
 
 ### Fixed

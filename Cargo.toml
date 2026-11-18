@@ -1,6 +1,6 @@
 [package]
 name = "llm-budget"
-version = "0.8.1"
+version = "0.8.2"
 edition = "2021"
 rust-version = "1.85"
 description = "Hard USD spend limits for LLM agents: per-agent and fleet caps, child scopes for parallel sub-agents, real per-model prices, kill switch, automatic model downgrade"
@@ -66,9 +66,9 @@ tokio = { version = "1.40", features = ["sync", "fs"], optional = true }
 llm-prices = "1.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-thiserror = "1.0"
+thiserror = "2"
 # lock-free agent registry
-dashmap = "5.5"
+dashmap = "6.1"
 # exact token counts (feature "tokens")
 tiktoken-rs = { version = "0.12.1", optional = true }
 # rate limits (feature "ratelimit")

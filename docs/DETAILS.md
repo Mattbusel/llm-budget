@@ -19,7 +19,7 @@ cargo add llm-budget
 cargo add tokio --features macros,rt-multi-thread
 ```
 
-Optional features: `tokens`, `ratelimit`, `tracing`, `tracing-layer`, `metrics`, `schemars`, `async-openai`, `rig`. Table below.
+Optional features: `tokens`, `ratelimit`, `tracing`, `tracing-layer`, `metrics`, `metrics-layer`, `tower`, `schemars`, `async-openai`, `genai`, `rig`. Table below. Wiring it into another project: [INTEGRATING.md](INTEGRATING.md).
 
 ## In ten lines
 
@@ -129,16 +129,18 @@ It makes no HTTP calls, so it works next to any client:
 
 | Feature | Default | What it adds | Extra dependencies |
 |---|---|---|---|
-| (none) | | Budgets, fleet caps, kill switch, tier cascade, price table, `record` / `reserve_for` / `settle_usage`. No async runtime | serde, dashmap, thiserror, [llm-prices](https://crates.io/crates/llm-prices) |
+| (none) | | Budgets, fleet caps, kill switch, tier cascade, price table, `record` / `reserve_for` / `settle_usage`. No async runtime | serde, serde_json, dashmap, thiserror, [llm-prices](https://crates.io/crates/llm-prices) |
 | `store` | yes | `BudgetStore`: JSON persistence. Turn default features off to drop tokio | tokio (`sync`, `fs`) |
 | `tokens` | no | `tokens::count_tokens`, `cost_of_text`, `AgentBudget::charge_model_text`: token counts from text with OpenAI's tokenizers | [tiktoken-rs](https://crates.io/crates/tiktoken-rs) |
 | `ratelimit` | no | `ratelimit::TokenRateLimiter`: tokens-per-minute and requests-per-minute limits with a retry-after time | [governor](https://crates.io/crates/governor) |
 | `tracing` | no | A `tracing` event for every accepted or refused charge, downgrade and kill | [tracing](https://crates.io/crates/tracing) |
 | `tracing-layer` | no | `tracing_layer::CostLayer`: prices spans with OpenTelemetry GenAI usage fields (rig, other GenAI instrumentations), emits `gen_ai.usage.cost.amount` / `.currency` / `.source`, optional capped budget | [tracing](https://crates.io/crates/tracing), [tracing-subscriber](https://crates.io/crates/tracing-subscriber) (`registry` only) |
 | `metrics` | no | `llm_budget_charges_total`, `llm_budget_spent_usd`, `llm_budget_remaining_usd`, `llm_budget_downgrades_total` through the metrics facade (Prometheus and other exporters) | [metrics](https://crates.io/crates/metrics) |
+| `metrics-layer` | no | `metrics_layer::CostLayer`: wraps a metrics recorder and prices token counters a framework already emits (swiftide preset, or any model-labelled counter) into a USD metric, optional capped budget | [metrics](https://crates.io/crates/metrics), [metrics-util](https://crates.io/crates/metrics-util) |
+| `tower` | no | `tower_layer::BudgetLayer`: reserve before each call, refuse calls over the cap before they are sent, settle the reported usage; ready-made estimator for OpenAI-compatible `http` requests | [tower](https://crates.io/crates/tower), [http](https://crates.io/crates/http), [bytes](https://crates.io/crates/bytes) |
 | `async-openai` | no | `openai` module: reserve from a `CreateChatCompletionRequest`, settle from a `CreateChatCompletionResponse` or a stream's final usage chunk; `From<&CompletionUsage> for Usage` | [async-openai](https://crates.io/crates/async-openai) types only (no HTTP client) |
 | `genai` | no | `genai` module: `exec_chat` and `exec_chat_stream` run a genai `Client` call under a reserve/settle hold; `From<&genai Usage> for Usage` | [genai](https://crates.io/crates/genai) |
-| `rig` | no | `rig::BudgetHook`, an `AgentHook` for rig-agent 0.44 that charges every model turn and stops the run at the cap, and `From<&rig Usage> for Usage`. Needs Rust 1.95 | [rig-agent](https://crates.io/crates/rig-agent) (no default features) |
+| `rig` | no | `rig::BudgetHook`, an `AgentHook` for rig-agent 0.44 to 0.46 that charges every model turn and stops the run at the cap, and `From<&rig Usage> for Usage`. Needs Rust 1.95 | [rig-agent](https://crates.io/crates/rig-agent) (no default features) |
 | `schemars` | no | JSON Schema for `SpendRecord`, `BudgetSnapshot`, `ChargeReceipt` and the saved state, for non-Rust readers of those files | [schemars](https://crates.io/crates/schemars) |
 
 ## Examples
