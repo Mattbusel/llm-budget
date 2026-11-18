@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.1] - 2026-11-18
+
+A smaller core build, for projects that add llm-budget as a dependency. No API change.
+
+### Changed
+- **dashmap removed.** `FleetAllocator` keeps its agent registry in a std `RwLock<HashMap>`; lookups clone an `Arc` and drop the lock at once, so no lock is held across an `await` or a charge. dashmap never appeared in the public API. `cargo tree -e normal --no-default-features` goes from 25 crates to 15 (llm-budget itself and serde's proc-macro stack included): dashmap, hashbrown 0.14, lock_api, parking_lot_core, scopeguard, smallvec, crossbeam-utils, once_cell, cfg-if and windows-link are gone. With default features (`store`, tokio) it is 17.
+
 ## [0.9.0] - 2026-11-18
 
 ### Added

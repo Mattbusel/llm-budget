@@ -26,10 +26,12 @@ run by `tests/api_surface.rs` and the examples in CI.
 llm-budget = { version = "0.9", default-features = false }
 ```
 
-Without default features the crate pulls in serde, serde_json, thiserror,
-dashmap and [llm-prices](https://crates.io/crates/llm-prices) (dated,
-source-cited prices with no dependencies of its own). Everything heavier is
-behind a feature:
+Without default features the crate pulls in serde, serde_json, thiserror
+and [llm-prices](https://crates.io/crates/llm-prices) (dated, source-cited
+prices with no dependencies of its own): 15 crates in
+`cargo tree -e normal --no-default-features`, counting llm-budget itself and
+serde's proc-macro stack. Nothing links C, spawns threads or opens sockets.
+Everything heavier is behind a feature:
 
 | Feature | Default | Adds | Pulls in |
 |---|---|---|---|

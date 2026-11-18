@@ -130,7 +130,7 @@ It makes no HTTP calls, so it works next to any client:
 
 | Feature | Default | What it adds | Extra dependencies |
 |---|---|---|---|
-| (none) | | Budgets, fleet caps, kill switch, tier cascade, price table, `record` / `reserve_for` / `settle_usage`. No async runtime | serde, serde_json, dashmap, thiserror, [llm-prices](https://crates.io/crates/llm-prices) |
+| (none) | | Budgets, fleet caps, kill switch, tier cascade, price table, `record` / `reserve_for` / `settle_usage`. No async runtime | serde, serde_json, thiserror, [llm-prices](https://crates.io/crates/llm-prices) |
 | `store` | yes | `BudgetStore`: JSON persistence. Turn default features off to drop tokio | tokio (`sync`, `fs`) |
 | `tokens` | no | `tokens::count_tokens`, `cost_of_text`, `AgentBudget::charge_model_text`: token counts from text with OpenAI's tokenizers | [tiktoken-rs](https://crates.io/crates/tiktoken-rs) |
 | `ratelimit` | no | `ratelimit::TokenRateLimiter`: tokens-per-minute and requests-per-minute limits with a retry-after time | [governor](https://crates.io/crates/governor) |

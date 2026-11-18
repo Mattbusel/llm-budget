@@ -3,9 +3,9 @@
 use crate::budget::{nanos_to_usd, usd_to_nanos, AgentBudget, AuditLog, BudgetSnapshot, ChargeReceipt};
 use crate::error::BudgetError;
 use crate::model::ModelTier;
-use dashmap::DashMap;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 /// Fleet-level budget: the total that may be handed out to agents, and what they spent.
 pub struct FleetBudget {
@@ -97,7 +97,9 @@ impl FleetBudget {
 /// For the fleet's real total, sum the agents' [`AgentBudget::spent_usd`].
 pub struct FleetAllocator {
     fleet: Arc<FleetBudget>,
-    agents: DashMap<String, Arc<AgentBudget>>,
+    // A plain std map behind a lock: lookups clone an Arc and drop the guard,
+    // so no guard is ever held across an await or a charge.
+    agents: RwLock<HashMap<String, Arc<AgentBudget>>>,
     default_tier: ModelTier,
     default_cascade_threshold: f64,
     audit_log: AuditLog,
@@ -116,7 +118,7 @@ impl FleetAllocator {
     ) -> Result<Self, BudgetError> {
         Ok(Self {
             fleet: Arc::new(FleetBudget::new(fleet_limit_usd)?),
-            agents: DashMap::new(),
+            agents: RwLock::new(HashMap::new()),
             default_tier,
             default_cascade_threshold,
             audit_log: AuditLog::default(),
@@ -136,22 +138,20 @@ impl FleetAllocator {
     /// [`BudgetError::AllocationFailed`] if the fleet cannot cover the limit,
     /// [`BudgetError::InvalidConfig`] if the id is already registered or the limit is invalid.
     pub fn register_agent(&self, agent_id: &str, limit_usd: f64) -> Result<(), BudgetError> {
-        use dashmap::mapref::entry::Entry;
         let budget = AgentBudget::builder(agent_id, limit_usd)
             .tier(self.default_tier)
             .cascade_threshold(self.default_cascade_threshold)
             .audit_log(self.audit_log)
             .build()?;
-        match self.agents.entry(agent_id.to_string()) {
-            Entry::Occupied(_) => Err(BudgetError::InvalidConfig(format!(
+        let mut agents = self.write();
+        if agents.contains_key(agent_id) {
+            return Err(BudgetError::InvalidConfig(format!(
                 "agent '{agent_id}' is already registered"
-            ))),
-            Entry::Vacant(slot) => {
-                self.fleet.allocate(agent_id, limit_usd)?;
-                slot.insert(Arc::new(budget));
-                Ok(())
-            }
+            )));
         }
+        self.fleet.allocate(agent_id, limit_usd)?;
+        agents.insert(agent_id.to_string(), Arc::new(budget));
+        Ok(())
     }
 
     /// Remove an agent and return its unspent cap to the fleet.
@@ -159,8 +159,8 @@ impl FleetAllocator {
     /// # Errors
     /// [`BudgetError::UnknownAgent`] if no such agent is registered.
     pub fn remove_agent(&self, agent_id: &str) -> Result<RemovedAgent, BudgetError> {
-        let (_, agent) = self
-            .agents
+        let agent = self
+            .write()
             .remove(agent_id)
             .ok_or_else(|| BudgetError::UnknownAgent(agent_id.to_string()))?;
         // The agent's spent money stays counted against the fleet allocation;
@@ -170,10 +170,25 @@ impl FleetAllocator {
         Ok(RemovedAgent { spent_usd: agent.spent_usd(), released_usd: remaining })
     }
 
+    fn read(&self) -> RwLockReadGuard<'_, HashMap<String, Arc<AgentBudget>>> {
+        // A panic while holding the lock cannot leave the map half-updated
+        // (every write is a single insert or remove), so a poisoned lock is safe to use.
+        self.agents.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn write(&self) -> RwLockWriteGuard<'_, HashMap<String, Arc<AgentBudget>>> {
+        self.agents.write().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Every registered agent, cloned out so no lock is held while they are used.
+    fn all_agents(&self) -> Vec<Arc<AgentBudget>> {
+        self.read().values().cloned().collect()
+    }
+
     fn agent(&self, agent_id: &str) -> Result<Arc<AgentBudget>, BudgetError> {
-        self.agents
+        self.read()
             .get(agent_id)
-            .map(|a| Arc::clone(a.value()))
+            .cloned()
             .ok_or_else(|| BudgetError::UnknownAgent(agent_id.to_string()))
     }
 
@@ -257,7 +272,7 @@ impl FleetAllocator {
 
     /// Kill all agents (emergency fleet shutdown).
     pub fn kill_all(&self, reason: &str) {
-        for agent in self.agents.iter() {
+        for agent in self.all_agents() {
             agent.kill(reason);
         }
     }
@@ -295,9 +310,10 @@ impl FleetAllocator {
 
     /// Real-time spend snapshot for all agents.
     pub async fn fleet_snapshot(&self) -> Vec<BudgetSnapshot> {
-        let mut snapshots = Vec::with_capacity(self.agents.len());
-        for entry in self.agents.iter() {
-            snapshots.push(entry.snapshot().await);
+        let agents = self.all_agents();
+        let mut snapshots = Vec::with_capacity(agents.len());
+        for agent in agents {
+            snapshots.push(agent.snapshot().await);
         }
         snapshots
     }
@@ -309,7 +325,7 @@ impl FleetAllocator {
 
     /// Number of registered agents.
     pub fn agent_count(&self) -> usize {
-        self.agents.len()
+        self.read().len()
     }
 
     /// True when the whole fleet total has been handed out to agents.
