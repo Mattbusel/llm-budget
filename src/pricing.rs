@@ -128,6 +128,14 @@ pub struct ModelPrice {
     pub cache_write_per_million: Option<f64>,
     /// Largest prompt the model accepts, in tokens, if listed.
     pub max_input_tokens: Option<u32>,
+    /// The date (`YYYY-MM-DD`) this price was last checked against its
+    /// source, if known. Built-in rows carry it (llm-prices rows their own
+    /// `checked` date, LiteLLM rows [`SNAPSHOT_DATE`]); an
+    /// [`AgentBudget`](crate::AgentBudget) refuses a price older than its
+    /// [`max_price_age_days`](crate::AgentBudgetBuilder::max_price_age_days).
+    /// `None` (a price you set yourself without a date) is never judged stale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked: Option<String>,
 }
 
 impl ModelPrice {
@@ -153,7 +161,15 @@ impl ModelPrice {
             cache_read_per_million: None,
             cache_write_per_million: None,
             max_input_tokens: None,
+            checked: None,
         }
+    }
+
+    /// Record the date (`YYYY-MM-DD`) this price was checked against its
+    /// source, so a budget can refuse it once it is too old.
+    pub fn with_checked(mut self, date: impl Into<String>) -> Self {
+        self.checked = Some(date.into());
+        self
     }
 
     /// Set the cache-read and cache-write prices (USD per million tokens).
@@ -165,40 +181,60 @@ impl ModelPrice {
 
     /// Cost in USD of a call with the given token counts.
     pub fn cost(&self, input_tokens: u64, output_tokens: u64) -> f64 {
-        (input_tokens as f64 * self.input_per_million
-            + output_tokens as f64 * self.output_per_million)
-            / 1_000_000.0
+        (input_tokens as f64 * self.input_per_million + output_tokens as f64 * self.output_per_million) / 1_000_000.0
     }
 
     /// Cost in USD of a call described by a provider-reported [`Usage`]:
     /// fresh prompt tokens at the input price, cache reads and cache writes at
-    /// their own prices (or the input price when the table lists none), and
-    /// output tokens at the output price.
+    /// their own prices, and output tokens at the output price.
+    ///
+    /// Cache tokens are priced explicitly or not at all: a call that read
+    /// from (or wrote to) the prompt cache on a row with no cache-read (or
+    /// cache-write) price is an error, not a guess at the input price. Before
+    /// 0.10 those tokens were silently billed as plain input, which is how
+    /// cost trackers end up several times off on cached workloads.
+    ///
+    /// # Errors
+    /// [`BudgetError::CachePriceMissing`] as above.
     ///
     /// [`Usage`]: crate::usage::Usage
-    pub fn cost_usage(&self, usage: &crate::usage::Usage) -> f64 {
-        let read = self.cache_read_per_million.unwrap_or(self.input_per_million);
-        let write = self.cache_write_per_million.unwrap_or(self.input_per_million);
-        (usage.fresh_input_tokens() as f64 * self.input_per_million
-            + usage.cached_input_tokens.min(usage.input_tokens) as f64 * read
-            + usage.cache_write_tokens.min(usage.input_tokens.saturating_sub(usage.cached_input_tokens)) as f64 * write
+    pub fn cost_usage(&self, usage: &crate::usage::Usage) -> Result<f64, BudgetError> {
+        let cached = usage.cached_input_tokens.min(usage.input_tokens);
+        let written = usage.cache_write_tokens.min(usage.input_tokens.saturating_sub(cached));
+        let read = self.cache_rate(cached, self.cache_read_per_million, "read")?;
+        let write = self.cache_rate(written, self.cache_write_per_million, "write")?;
+        Ok((usage.fresh_input_tokens() as f64 * self.input_per_million
+            + cached as f64 * read
+            + written as f64 * write
             + usage.output_tokens as f64 * self.output_per_million)
-            / 1_000_000.0
+            / 1_000_000.0)
     }
 
     /// Cost in USD when part of the prompt was served from the provider's cache.
     ///
-    /// `cached_input_tokens` is billed at the cache-read price (or the normal
-    /// input price if the table has none) and the rest of `input_tokens` at the
-    /// normal input price.
-    pub fn cost_with_cache(&self, input_tokens: u64, cached_input_tokens: u64, output_tokens: u64) -> f64 {
-        let cached = cached_input_tokens.min(input_tokens);
-        let fresh = input_tokens - cached;
-        let cache_rate = self.cache_read_per_million.unwrap_or(self.input_per_million);
-        (fresh as f64 * self.input_per_million
-            + cached as f64 * cache_rate
-            + output_tokens as f64 * self.output_per_million)
-            / 1_000_000.0
+    /// `cached_input_tokens` is billed at the cache-read price and the rest of
+    /// `input_tokens` at the normal input price.
+    ///
+    /// # Errors
+    /// [`BudgetError::CachePriceMissing`] when `cached_input_tokens` is not
+    /// zero and the row lists no cache-read price.
+    pub fn cost_with_cache(
+        &self,
+        input_tokens: u64,
+        cached_input_tokens: u64,
+        output_tokens: u64,
+    ) -> Result<f64, BudgetError> {
+        self.cost_usage(&crate::usage::Usage::new(input_tokens, output_tokens).with_cache_read(cached_input_tokens))
+    }
+
+    /// The rate for `tokens` cache tokens: the listed one, or an error when
+    /// there are tokens to price and no listed rate.
+    fn cache_rate(&self, tokens: u64, rate: Option<f64>, kind: &'static str) -> Result<f64, BudgetError> {
+        match rate {
+            Some(r) => Ok(r),
+            None if tokens == 0 => Ok(0.0),
+            None => Err(BudgetError::CachePriceMissing { model: self.model.clone(), kind }),
+        }
     }
 }
 
@@ -354,7 +390,11 @@ impl std::fmt::Debug for PriceTable {
 }
 
 fn opt(v: f64) -> Option<f64> {
-    if v.is_nan() { None } else { Some(v) }
+    if v.is_nan() {
+        None
+    } else {
+        Some(v)
+    }
 }
 
 /// llm-prices spells Gemini's provider `google`; this table uses LiteLLM's names.
@@ -371,13 +411,37 @@ fn first_cache_write(list: &[(&'static str, f64)]) -> Option<f64> {
     list.iter().find(|(k, _)| *k == "5m").or_else(|| list.first()).map(|&(_, v)| v)
 }
 
-/// The cost of `usage` from llm-prices, with its long-context tiers. `None`
-/// when llm-prices does not list the model or a price it needs.
-fn llm_prices_cost(model: &str, usage: &Usage) -> Option<f64> {
-    let p = llm_prices::lookup(model)?;
+/// Why llm-prices could not price a call to a model it lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Miss {
+    /// A price the call needs (input, output, batch, long-context) is not listed.
+    Rates,
+    /// The call read from the prompt cache and the row lists no cache-read price.
+    CacheRead,
+    /// The call wrote to the prompt cache and the row lists no cache-write price.
+    CacheWrite,
+}
+
+/// The cost of `usage` on the llm-prices row `p`, with its long-context tiers.
+///
+/// Fails closed: llm-prices itself bills cache reads as plain input when a
+/// row lists no cache-read price; here that is [`Miss::CacheRead`]. Cache
+/// writes need a listed price for some cache lifetime.
+fn llm_prices_cost(p: &llm_prices::Price, usage: &Usage) -> Result<f64, Miss> {
     let cached = usage.cached_input_tokens.min(usage.input_tokens);
     let write = usage.cache_write_tokens.min(usage.input_tokens - cached);
     let fresh = usage.input_tokens - cached - write;
+    if cached > 0 && p.cache_read.is_none() {
+        return Err(Miss::CacheRead);
+    }
+    if write > 0 && p.cache_write.is_empty() {
+        return Err(Miss::CacheWrite);
+    }
+    let mut row = *p;
+    if row.output.is_none() && usage.output_tokens == 0 {
+        // An embedding model: no output price, and nothing to price at it.
+        row.output = Some(0.0);
+    }
     let mut u = llm_prices::Usage {
         input: fresh,
         output: usage.output_tokens,
@@ -385,25 +449,25 @@ fn llm_prices_cost(model: &str, usage: &Usage) -> Option<f64> {
         cache_write_5m: write,
         ..llm_prices::Usage::default()
     };
-    if let Some(c) = p.cost_usage(&u) {
-        return Some(c.total);
+    if let Some(c) = row.cost_usage(&u) {
+        return Ok(c.total);
     }
     if write == 0 {
-        return None;
+        return Err(Miss::Rates);
     }
     // Rows that list other cache lifetimes only (OpenAI's 30m and 12h): price
     // the writes as plain input through llm-prices, so they still count toward
     // the long-context threshold, then move them to the shortest lifetime's rate.
     u.cache_write_5m = 0;
     u.input = fresh + write;
-    let c = p.cost_usage(&u)?;
-    let (in_rate, writes) = match p.long_context {
+    let c = row.cost_usage(&u).ok_or(Miss::Rates)?;
+    let (in_rate, writes) = match row.long_context {
         Some(lc) if c.long_context => (lc.input, lc.cache_write),
-        _ => (p.input, p.cache_write),
+        _ => (row.input, row.cache_write),
     };
-    let in_rate = in_rate?;
-    let write_rate = first_cache_write(writes).unwrap_or(in_rate);
-    Some(c.total + write as f64 * (write_rate - in_rate) / 1_000_000.0)
+    let in_rate = in_rate.ok_or(Miss::Rates)?;
+    let write_rate = first_cache_write(writes).ok_or(Miss::CacheWrite)?;
+    Ok(c.total + write as f64 * (write_rate - in_rate) / 1_000_000.0)
 }
 
 fn from_llm_price(p: &llm_prices::Price, existing: Option<&ModelPrice>, key: &str) -> Option<ModelPrice> {
@@ -415,6 +479,7 @@ fn from_llm_price(p: &llm_prices::Price, existing: Option<&ModelPrice>, key: &st
         cache_read_per_million: p.cache_read,
         cache_write_per_million: first_cache_write(p.cache_write),
         max_input_tokens: existing.and_then(|e| e.max_input_tokens),
+        checked: Some(p.checked.to_string()),
     })
 }
 
@@ -449,6 +514,7 @@ impl PriceTable {
                             cache_read_per_million: opt(cr),
                             cache_write_per_million: opt(cw),
                             max_input_tokens: if max_in == 0 { None } else { Some(max_in) },
+                            checked: Some(SNAPSHOT_DATE.to_string()),
                         },
                     )
                 })
@@ -545,8 +611,12 @@ impl PriceTable {
     /// assert_eq!(t.lookup("in-house-70b", &u).status, PriceStatus::Unpriced);
     /// ```
     pub fn lookup(&self, model: &str, usage: &Usage) -> PriceLookup {
-        if let Ok(usd) = self.cost_usage(model, usage) {
-            return PriceLookup { status: PriceStatus::Exact, cost_usd: Some(usd) };
+        match self.cost_usage(model, usage) {
+            Ok(usd) => return PriceLookup { status: PriceStatus::Exact, cost_usd: Some(usd) },
+            Err(BudgetError::CachePriceMissing { .. } | BudgetError::Unpriced { .. }) => {
+                return PriceLookup { status: PriceStatus::Unpriced, cost_usd: None };
+            }
+            Err(_) => {}
         }
         let bare = model.split_once('/').map(|(_, b)| b);
         let declared = self.unpriced.contains(model) || bare.is_some_and(|b| self.unpriced.contains(b));
@@ -576,8 +646,16 @@ impl PriceTable {
     /// # Ok::<(), llm_budget::BudgetError>(())
     /// ```
     ///
+    /// For a model llm-prices lists, its answer is final: when it cannot
+    /// price the call (a cache, batch or long-context price the call needs is
+    /// not listed) the call is not priced from an older row instead.
+    ///
     /// # Errors
-    /// [`BudgetError::UnknownModel`] if no source can price the model.
+    /// [`BudgetError::UnknownModel`] if no source knows the model,
+    /// [`BudgetError::CachePriceMissing`] if the call read from or wrote to the
+    /// prompt cache and the price has no rate for that, and
+    /// [`BudgetError::Unpriced`] (status [`PriceStatus::Unpriced`]) if
+    /// llm-prices lists the model without a price the call needs.
     pub fn cost_usage(&self, model: &str, usage: &Usage) -> Result<f64, BudgetError> {
         if let Some(hook) = &self.hook {
             if let Some(usd) = hook(model, usage).filter(|u| u.is_finite() && *u >= 0.0) {
@@ -585,14 +663,45 @@ impl PriceTable {
             }
         }
         if let Some(p) = self.overridden_price(model) {
-            return Ok(p.cost_usage(usage));
+            return p.cost_usage(usage);
         }
         if self.llm_prices {
-            if let Some(usd) = llm_prices_cost(model, usage) {
-                return Ok(usd);
+            if let Some(p) = llm_prices::lookup(model) {
+                return llm_prices_cost(p, usage).map_err(|miss| match miss {
+                    Miss::CacheRead => BudgetError::CachePriceMissing { model: model.to_string(), kind: "read" },
+                    Miss::CacheWrite => BudgetError::CachePriceMissing { model: model.to_string(), kind: "write" },
+                    Miss::Rates => BudgetError::Unpriced { model: model.to_string(), status: PriceStatus::Unpriced },
+                });
             }
         }
-        Ok(self.require(model)?.cost_usage(usage))
+        self.require(model)?.cost_usage(usage)
+    }
+
+    /// The date (`YYYY-MM-DD`) the price [`cost_usage`](Self::cost_usage)
+    /// would use for this call was last checked against its source, or
+    /// `None` when it is not known (a price from the hook, or a row you added
+    /// without [`ModelPrice::with_checked`]) or the model has no price.
+    ///
+    /// ```
+    /// use llm_budget::{PriceTable, Usage};
+    /// let d = PriceTable::builtin().checked_date("gpt-4o", &Usage::new(1, 1)).unwrap();
+    /// assert_eq!(d.len(), 10);
+    /// ```
+    pub fn checked_date(&self, model: &str, usage: &Usage) -> Option<&str> {
+        if let Some(hook) = &self.hook {
+            if hook(model, usage).is_some_and(|u| u.is_finite() && u >= 0.0) {
+                return None;
+            }
+        }
+        if let Some(p) = self.overridden_price(model) {
+            return p.checked.as_deref();
+        }
+        if self.llm_prices {
+            if let Some(p) = llm_prices::lookup(model) {
+                return Some(p.checked);
+            }
+        }
+        self.get(model).and_then(|p| p.checked.as_deref())
     }
 
     /// Cost in USD of `input_tokens` and `output_tokens` on `model`, with no
@@ -633,11 +742,10 @@ impl PriceTable {
     /// # Errors
     /// [`BudgetError::InvalidConfig`] if the text is not a JSON object.
     pub fn from_litellm_json(json: &str) -> Result<Self, BudgetError> {
-        let value: serde_json::Value = serde_json::from_str(json)
-            .map_err(|e| BudgetError::InvalidConfig(format!("price table JSON: {e}")))?;
-        let obj = value
-            .as_object()
-            .ok_or_else(|| BudgetError::InvalidConfig("price table JSON must be an object".into()))?;
+        let value: serde_json::Value =
+            serde_json::from_str(json).map_err(|e| BudgetError::InvalidConfig(format!("price table JSON: {e}")))?;
+        let obj =
+            value.as_object().ok_or_else(|| BudgetError::InvalidConfig("price table JSON must be an object".into()))?;
         let mut prices = HashMap::new();
         for (key, v) in obj {
             let f = |name: &str| v.get(name).and_then(serde_json::Value::as_f64);
@@ -649,11 +757,7 @@ impl PriceTable {
                 key.clone(),
                 ModelPrice {
                     model: key.clone(),
-                    provider: v
-                        .get("litellm_provider")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("")
-                        .to_string(),
+                    provider: v.get("litellm_provider").and_then(serde_json::Value::as_str).unwrap_or("").to_string(),
                     input_per_million: per_m(i),
                     output_per_million: per_m(o),
                     cache_read_per_million: f("cache_read_input_token_cost").map(per_m),
@@ -662,6 +766,7 @@ impl PriceTable {
                         .get("max_input_tokens")
                         .and_then(serde_json::Value::as_u64)
                         .and_then(|n| u32::try_from(n).ok()),
+                    checked: None,
                 },
             );
         }
@@ -775,10 +880,10 @@ mod tests {
     fn cache_reads_are_cheaper() {
         let p = PriceTable::builtin().require("claude-sonnet-4-5").expect("model");
         let full = p.cost(10_000, 0);
-        let cached = p.cost_with_cache(10_000, 8_000, 0);
+        let cached = p.cost_with_cache(10_000, 8_000, 0).unwrap();
         assert!(cached < full);
         // cached tokens can never exceed input tokens
-        assert_eq!(p.cost_with_cache(100, 1_000, 0), p.cost_with_cache(100, 100, 0));
+        assert_eq!(p.cost_with_cache(100, 1_000, 0).unwrap(), p.cost_with_cache(100, 100, 0).unwrap());
     }
 
     #[test]
@@ -811,6 +916,7 @@ mod tests {
             cache_read_per_million: None,
             cache_write_per_million: None,
             max_input_tokens: None,
+            checked: None,
         });
         assert!((t.require("in-house").expect("x").cost(2_000_000, 0) - 1.0).abs() < 1e-12);
     }
@@ -865,10 +971,11 @@ mod source_tests {
         let long = t.cost_usage("gpt-5.4", &Usage::new(300_000, 0)).unwrap();
         assert!((long - 1.5).abs() < 1e-9);
         // cached tokens count toward the threshold and bill at the long cache rate
-        let u = Usage { input_tokens: 300_000, cached_input_tokens: 200_000, cache_write_tokens: 0, output_tokens: 4_000 };
+        let u =
+            Usage { input_tokens: 300_000, cached_input_tokens: 200_000, cache_write_tokens: 0, output_tokens: 4_000 };
         assert!((t.cost_usage("gpt-5.4", &u).unwrap() - 0.69).abs() < 1e-9);
         // the row's flat price (ModelPrice) knows nothing of the tier
-        assert!((t.require("gpt-5.4").unwrap().cost_usage(&u) - 0.69).abs() > 1e-3);
+        assert!((t.require("gpt-5.4").unwrap().cost_usage(&u).unwrap() - 0.69).abs() > 1e-3);
     }
 
     #[test]

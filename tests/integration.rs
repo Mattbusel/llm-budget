@@ -12,7 +12,8 @@ use tempfile::TempDir;
 #[tokio::test]
 async fn test_agent_budget_charge_and_snapshot() {
     let agent = AgentBudget::new("agent-1", 10.0, ModelTier::Standard, 0.2).unwrap();
-    let (cost, downgrade) = agent.charge(100, 50, None, None).await.unwrap();
+    let r = agent.charge_model("gpt-4o", 100, 50, None, None).await.unwrap();
+    let (cost, downgrade) = (r.total_spent_usd, r.downgraded_to);
     assert!(cost >= 0.0);
     assert!(downgrade.is_none() || downgrade.is_some()); // just verify no panic
     let snap = agent.snapshot().await;
@@ -25,7 +26,7 @@ async fn test_agent_budget_exhausted_after_overspend() {
     // Give a tiny budget so any charge exhausts it
     let agent = AgentBudget::new("agent-tiny", 0.000001, ModelTier::Standard, 0.2).unwrap();
     // Charge something that will cost more than the budget
-    let result = agent.charge(100_000, 100_000, None, None).await;
+    let result = agent.charge_model("gpt-4o", 100_000, 100_000, None, None).await;
     // May succeed or fail depending on exact cost calc; just verify no panic
     let _ = result;
 }
@@ -34,7 +35,7 @@ async fn test_agent_budget_exhausted_after_overspend() {
 async fn test_agent_kill_switch_blocks_subsequent_charges() {
     let agent = AgentBudget::new("agent-kill", 100.0, ModelTier::Standard, 0.2).unwrap();
     agent.kill("test shutdown");
-    let result = agent.charge(100, 50, None, None).await;
+    let result = agent.charge_model("gpt-4o", 100, 50, None, None).await;
     assert!(matches!(result, Err(BudgetError::KillSwitchActivated { .. })));
 }
 
@@ -116,7 +117,7 @@ async fn test_persistence_save_then_reload_from_disk() {
     {
         let store = BudgetStore::new(dir.path());
         let agent = AgentBudget::new("agent-persist", 10.0, ModelTier::Standard, 0.2).unwrap();
-        agent.charge(10, 5, None, None).await.unwrap();
+        agent.charge_model("gpt-4o", 10, 5, None, None).await.unwrap();
         let snaps = vec![agent.snapshot().await];
         store.save("session-1", snaps).await.unwrap();
     }

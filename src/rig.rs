@@ -335,7 +335,10 @@ mod tests {
     fn rig_usage_maps_cache_parts() {
         let u = RigUsage::new().input_tokens(2_100).output_tokens(50).cached_input_tokens(2_000);
         let ours = Usage::from(&u);
-        assert_eq!(ours, Usage { input_tokens: 2_100, cached_input_tokens: 2_000, cache_write_tokens: 0, output_tokens: 50 });
+        assert_eq!(
+            ours,
+            Usage { input_tokens: 2_100, cached_input_tokens: 2_000, cache_write_tokens: 0, output_tokens: 50 }
+        );
         // nonsense counts never underflow
         let odd = RigUsage::new().input_tokens(10).cached_input_tokens(8).cache_creation_input_tokens(8);
         assert_eq!(Usage::from(&odd).fresh_input_tokens(), 0);

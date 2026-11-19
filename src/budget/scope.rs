@@ -69,9 +69,7 @@ use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use super::{
-    lock, nanos_to_usd, usd_to_nanos, AgentBudget, AtomicBudget, BudgetEnvelope, ScopeKind, SpendRecord,
-};
+use super::{lock, nanos_to_usd, usd_to_nanos, AgentBudget, AtomicBudget, BudgetEnvelope, ScopeKind, SpendRecord};
 use crate::error::BudgetError;
 use crate::model::ModelCascade;
 
@@ -278,6 +276,7 @@ impl AgentBudget {
             policy: self.policy,
             depth,
             max_depth: self.max_depth,
+            safety: Arc::clone(&self.safety),
         };
         Ok(ScopeGuard { budget: Arc::new(budget), held_nanos: nanos, open: true })
     }

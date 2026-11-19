@@ -55,7 +55,10 @@ fn main() -> Result<(), BudgetError> {
     drop(tool_slice);
     let report = BudgetContext::reporting(&agent);
     let task_metadata = a2a::to_metadata(&report)?;
-    println!("\nA2A task metadata on completion:\n{}", serde_json::to_string_pretty(&task_metadata).unwrap_or_default());
+    println!(
+        "\nA2A task metadata on completion:\n{}",
+        serde_json::to_string_pretty(&task_metadata).unwrap_or_default()
+    );
 
     // ── orchestrator books the report (twice received, booked once) ──
     let mut booker = IncurredBooker::new();

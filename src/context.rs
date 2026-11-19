@@ -430,10 +430,7 @@ fn new_reservation_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let t = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     let mut out = String::from("rsv_");
     for salt in 0..2u64 {
         let mut h = RandomState::new().build_hasher();
@@ -472,7 +469,12 @@ impl BudgetContext {
         Self {
             budget: Some(BudgetLimit { cost: Some(Money::usd(remaining)), tokens: None, deadline: None }),
             incurred: None,
-            reservation: Some(ReservationInfo { id: new_reservation_id(), amount: held, currency: usd(), expires: None }),
+            reservation: Some(ReservationInfo {
+                id: new_reservation_id(),
+                amount: held,
+                currency: usd(),
+                expires: None,
+            }),
         }
     }
 
@@ -506,7 +508,8 @@ impl BudgetContext {
     /// The money this context allows in USD: `budget.cost`, else the
     /// reservation amount.
     pub fn budget_usd(&self) -> Option<Amount> {
-        let from_budget = self.budget.as_ref().and_then(|b| b.cost.as_ref()).filter(|m| m.currency == crate::semconv::USD);
+        let from_budget =
+            self.budget.as_ref().and_then(|b| b.cost.as_ref()).filter(|m| m.currency == crate::semconv::USD);
         if let Some(m) = from_budget {
             return Some(m.amount);
         }
@@ -539,9 +542,8 @@ impl AgentBudget {
     /// [`BudgetError::InvalidConfig`] when `ctx` has no USD amount or it is
     /// zero.
     pub fn from_context(agent_id: impl Into<String>, ctx: &BudgetContext) -> Result<Self, BudgetError> {
-        let amount = ctx
-            .budget_usd()
-            .ok_or_else(|| BudgetError::InvalidConfig("budget context has no USD amount".into()))?;
+        let amount =
+            ctx.budget_usd().ok_or_else(|| BudgetError::InvalidConfig("budget context has no USD amount".into()))?;
         AgentBudget::builder(agent_id, amount.as_f64()).build()
     }
 }
@@ -729,7 +731,9 @@ pub mod baggage {
         let mut found = BTreeMap::new();
         for member in header.split(',') {
             let head = member.split(';').next().unwrap_or("");
-            let Some((key, value)) = head.split_once('=') else { continue };
+            let Some((key, value)) = head.split_once('=') else {
+                continue;
+            };
             let key = key.trim_matches([' ', '\t']);
             if !key.starts_with(PREFIX) {
                 continue;
@@ -839,7 +843,10 @@ pub mod a2a {
     ///
     /// # Errors
     /// Only if serialization fails.
-    pub fn insert(metadata: &mut serde_json::Map<String, serde_json::Value>, ctx: &BudgetContext) -> Result<(), ContextError> {
+    pub fn insert(
+        metadata: &mut serde_json::Map<String, serde_json::Value>,
+        ctx: &BudgetContext,
+    ) -> Result<(), ContextError> {
         metadata.insert(EXTENSION_URI.to_string(), ctx.to_json()?);
         Ok(())
     }

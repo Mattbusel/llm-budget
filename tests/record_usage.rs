@@ -47,7 +47,11 @@ fn record_unknown_model_books_nothing() {
 fn record_with_keeps_caller_context() {
     let agent = AgentBudget::builder("a", 1.0).build().unwrap();
     agent
-        .record_with("gpt-4o", &Usage::new(100, 10), ChargeContext::new().task("t-1").model("gpt-4o-2024-08-06").tokens(1, 2))
+        .record_with(
+            "gpt-4o",
+            &Usage::new(100, 10),
+            ChargeContext::new().task("t-1").model("gpt-4o-2024-08-06").tokens(1, 2),
+        )
         .unwrap();
     let r = &agent.drain_audit_log()[0];
     assert_eq!(r.task_id.as_deref(), Some("t-1"));
@@ -93,10 +97,7 @@ fn settle_usage_falls_back_to_reserved_model_then_estimate() {
 fn reserve_for_refuses_unknown_models_and_overruns() {
     let agent = AgentBudget::builder("a", 0.001).build().unwrap();
     assert!(matches!(agent.reserve_for("nope", &Usage::new(1, 1)), Err(BudgetError::UnknownModel(_))));
-    assert!(matches!(
-        agent.reserve_for("gpt-4o", &Usage::new(1_000_000, 0)),
-        Err(BudgetError::AgentExhausted { .. })
-    ));
+    assert!(matches!(agent.reserve_for("gpt-4o", &Usage::new(1_000_000, 0)), Err(BudgetError::AgentExhausted { .. })));
     agent.kill("done");
     assert!(matches!(agent.reserve_for("gpt-4o", &Usage::new(1, 0)), Err(BudgetError::KillSwitchActivated { .. })));
 }
@@ -144,10 +145,7 @@ fn charge_methods_use_the_agent_table() {
         let r = agent.charge_usage("only-model", &Usage::new(0, 1_000_000), None, None).await.unwrap();
         assert!((r.cost_usd - 2.0).abs() < 1e-9);
         // gpt-4o is not in this agent's table
-        assert!(matches!(
-            agent.charge_model("gpt-4o", 1, 1, None, None).await,
-            Err(BudgetError::UnknownModel(_))
-        ));
+        assert!(matches!(agent.charge_model("gpt-4o", 1, 1, None, None).await, Err(BudgetError::UnknownModel(_))));
     });
 }
 

@@ -73,14 +73,12 @@ impl ModelCascade {
     /// Create a cascade starting at `tier` with the given pressure threshold.
     pub fn new(tier: ModelTier, pressure_threshold: f64, total_budget: f64) -> Result<Self, crate::error::BudgetError> {
         if !(0.0..=1.0).contains(&pressure_threshold) {
-            return Err(crate::error::BudgetError::InvalidConfig(
-                format!("pressure_threshold must be in [0.0, 1.0], got {pressure_threshold}"),
-            ));
+            return Err(crate::error::BudgetError::InvalidConfig(format!(
+                "pressure_threshold must be in [0.0, 1.0], got {pressure_threshold}"
+            )));
         }
         if total_budget <= 0.0 {
-            return Err(crate::error::BudgetError::InvalidConfig(
-                "total_budget must be positive".into(),
-            ));
+            return Err(crate::error::BudgetError::InvalidConfig("total_budget must be positive".into()));
         }
         Ok(Self { current: tier, pressure_threshold, total_budget })
     }

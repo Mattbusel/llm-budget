@@ -44,7 +44,8 @@ pub(crate) fn downgraded(agent: &str, tier: ModelTier) {
     #[cfg(feature = "tracing")]
     tracing::info!(target: "llm_budget", agent, tier = ?tier, "model tier downgraded");
     #[cfg(feature = "metrics")]
-    metrics::counter!("llm_budget_downgrades_total", "agent" => agent.to_string(), "tier" => format!("{tier:?}")).increment(1);
+    metrics::counter!("llm_budget_downgrades_total", "agent" => agent.to_string(), "tier" => format!("{tier:?}"))
+        .increment(1);
 }
 
 pub(crate) fn killed(agent: &str, reason: &str) {

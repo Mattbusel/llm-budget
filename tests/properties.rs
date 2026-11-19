@@ -3,8 +3,8 @@
 #![allow(clippy::unwrap_used)]
 use llm_budget::budget::AtomicBudget;
 use llm_budget::{AgentBudget, AuditLog, ChargeContext, FleetAllocator, ModelTier};
-use std::sync::Arc;
 use proptest::prelude::*;
+use std::sync::Arc;
 
 fn rt() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread().build().unwrap()
@@ -149,7 +149,9 @@ fn concurrent_reservations_never_overshoot_beyond_settle_deltas() {
                     let mut overshoot_allowance = 0.0f64;
                     for _ in 0..200 {
                         let estimate = 0.001 + next() * 0.05;
-                        let Ok(r) = agent.reserve(estimate) else { continue };
+                        let Ok(r) = agent.reserve(estimate) else {
+                            continue;
+                        };
                         let factor = if over_estimate { next() * 2.0 } else { next() };
                         let actual = ((estimate * factor) * 1e9).round() / 1e9;
                         let held = r.estimate_usd();

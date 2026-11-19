@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.10.0] - 2026-11-19
+
+**Fail closed by default.** A budget that guesses a price is not a cap. Cost trackers keep shipping the same three guesses: an unknown model priced at $0 or a placeholder (in PraisonAI every newer model was billed at a $1/$3 default, under a fifth of a real gpt-5.5 call, so `max_budget=1.0` let about $3.42 through; PraisonAI #6433), cached tokens billed as plain input (6x off on a cached workload in our own rust-genai example; rust-genai #393), and a price table pasted into code that nobody updates (microsoft/conductor #645: 12 wrong rows). From 0.10 llm-budget refuses each of these instead of guessing, and every way out is explicit and warns on every call it lets through.
+
+This is a breaking release: code that relied on the old guesses now gets an error. Each error names the fix.
+
+### Changed (breaking)
+- **Cache tokens are priced explicitly or not at all.** `ModelPrice::cost_usage` and `ModelPrice::cost_with_cache` return `Result<f64, BudgetError>`: a call with cache reads (or writes) on a price with no cache-read (or cache-write) rate is the new `BudgetError::CachePriceMissing { model, kind }`, where it used to be billed at the input price. `PriceTable::cost_usage` applies the same rule to llm-prices rows (llm-prices itself falls back to the input price; llm-budget does not), and `PriceTable::lookup` reports such calls as `PriceStatus::Unpriced`, so an `UnpricedPolicy` decides.
+- **For a model llm-prices lists, its answer is final.** When llm-prices cannot price a call (a batch, long-context or cache rate the call needs is missing), the call is `BudgetError::Unpriced { status: Unpriced }` instead of being priced from an older LiteLLM row. An llm-prices row without an output price was copied into the table at $0 output; it is now only used for calls with no output tokens (embedding models).
+- **Stale prices are refused.** Every built-in price carries the date it was last checked against the provider's page (`ModelPrice::checked`, `PriceTable::checked_date`). `reserve_for`, `record`, `charge_model`, `charge_model_with` and `charge_usage` refuse a price checked more than 90 days ago (`DEFAULT_MAX_PRICE_AGE_DAYS`) with the new `BudgetError::StalePrice`, whose message says to run `cargo update -p llm-prices`. `AgentBudgetBuilder::max_price_age_days(n)` changes the limit and `price_check_date("YYYY-MM-DD")` judges ages as of a given day (replays, tests). Prices you add without a date (`ModelPrice::new`, a hook, `from_litellm_json`) are not judged; `ModelPrice::with_checked` dates them.
+- **`AgentBudget::charge` (tier-average pricing) is refused** with `BudgetError::Unpriced` unless the budget opted out with `allow_unpriced()`, and is deprecated: a tier average is a guessed price. Use `charge_model`, or `reserve_for` / `settle_usage`.
+- **Refusals name the reason.** Without an `UnpricedPolicy`, `reserve_for` / `record` return `CachePriceMissing` or `Unpriced` when that is why a call cannot be priced (it used to be `UnknownModel` for everything). `charge_model` and `charge_usage` now go through the unpriced-model policy too.
+- `ModelPrice` has a new public field, `checked: Option<String>` (serde: optional). Struct literals need `checked: None`.
+- `llm-prices` dependency raised to 1.8 (per-row `checked` dates, 612 rows, all checked 2026-10-23 or later). The LiteLLM snapshot was regenerated on 2026-11-19 (258 models).
+
+### Added
+- Module `safety`: the fail-closed defaults in one table, `UnsafeEvent` / `UnsafeKind`, `DEFAULT_MAX_PRICE_AGE_DAYS`, `days_from_date`.
+- Loud opt-outs on `AgentBudgetBuilder`, each emitting an `UnsafeEvent` on every call it lets through (to `on_unsafe(sink)`, else standard error; and a `tracing` warning with that feature): `allow_unpriced()` (an `UnpricedPolicy` of `Allow` for every status), `unsafe_soft_limit()` (admit calls over the cap, the way a soft limit does; kills and closed scopes still refuse), `allow_stale_prices()`. An `UnpricedPolicy` with `Allow` or `Reserve` now emits an event on every call it lets through. `AgentBudget::unsafe_events()` counts them across a tree; `is_soft_limit()`. Child scopes share the settings and the sink.
+- **`llm-budget audit`**, a command-line spend audit (`cargo install llm-budget`): replays a JSON-lines log of calls (`model` plus the provider's usage block in OpenAI, Anthropic or Gemini shape, optional `booked_usd`) under a soft limit and under a fail-closed hard cap, and reports the true cost of what the soft limit let through, the call at which real spend crossed the cap, the money past it, booked-versus-true drift per model, and every model without a usable price. Exit status 2 when money got past the cap (for CI gates), `--json` for machines, `--max-price-age`, `--today`. The same replay is a library API: `audit::{parse_jsonl, replay, AuditConfig, AuditReport}`.
+- `AgentBudgetBuilder::build` names the problem when a limit is zero, negative, NaN or infinite: a budget needs a hard cap.
+- Tests: `tests/fail_closed.rs` (every default and every opt-out), `tests/audit_cli.rs` (the binary end to end, exit codes, JSON), audit unit tests including the PraisonAI under-booking pattern.
+- `rustfmt.toml` (max width 120) and a `cargo fmt --check` step in CI; the tree was reformatted to it.
+
 ## [0.9.1] - 2026-11-18
 
 A smaller core build, for projects that add llm-budget as a dependency. No API change.

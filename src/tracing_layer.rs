@@ -431,7 +431,9 @@ where
 
     fn on_close(&self, id: Id, ctx: Context<'_, S>) {
         let Some(span) = ctx.span(&id) else { return };
-        let Some(data) = span.extensions_mut().remove::<GenAiSpan>() else { return };
+        let Some(data) = span.extensions_mut().remove::<GenAiSpan>() else {
+            return;
+        };
         if data.child_priced {
             return;
         }

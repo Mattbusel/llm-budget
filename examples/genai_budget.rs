@@ -7,9 +7,9 @@
 //!
 //! `cargo run --example genai_budget --features genai`
 
+use futures_util::StreamExt;
 use genai::chat::{ChatMessage, ChatOptions, ChatRequest, ChatStreamEvent};
 use llm_budget::{genai as budgeted, AgentBudget};
-use futures_util::StreamExt;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -36,7 +36,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(e) => return Err(e.into()),
         };
         let answer = res.first_text().unwrap_or_default().to_string();
-        println!("Q: {question}\nA: {answer}\n   ${:.6} (total ${:.6})\n", outcome.recorded_usd, outcome.total_spent_usd);
+        println!(
+            "Q: {question}\nA: {answer}\n   ${:.6} (total ${:.6})\n",
+            outcome.recorded_usd, outcome.total_spent_usd
+        );
         req = req.append_message(ChatMessage::assistant(answer));
         if outcome.over_cap {
             break;
@@ -45,7 +48,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Streaming: the End event carries the usage.
     let (mut res, hold) =
-        budgeted::exec_chat_stream(&client, &budget, &model, ChatRequest::from_user("Count to five."), Some(&opts)).await?;
+        budgeted::exec_chat_stream(&client, &budget, &model, ChatRequest::from_user("Count to five."), Some(&opts))
+            .await?;
     let mut hold = Some(hold);
     while let Some(event) = res.stream.next().await {
         match event? {

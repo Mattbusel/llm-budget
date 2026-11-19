@@ -108,7 +108,11 @@ pub struct BudgetLayer<Req, Resp> {
 
 impl<Req, Resp> Clone for BudgetLayer<Req, Resp> {
     fn clone(&self) -> Self {
-        Self { budget: Arc::clone(&self.budget), estimate: Arc::clone(&self.estimate), read_usage: Arc::clone(&self.read_usage) }
+        Self {
+            budget: Arc::clone(&self.budget),
+            estimate: Arc::clone(&self.estimate),
+            read_usage: Arc::clone(&self.read_usage),
+        }
     }
 }
 
@@ -148,8 +152,8 @@ pub const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 4_096;
 /// # Errors
 /// [`BudgetError::InvalidConfig`] when the body is not JSON or has no `model`.
 pub fn estimate_openai_body(body: &[u8]) -> Result<(String, Usage), BudgetError> {
-    let v: serde_json::Value =
-        serde_json::from_slice(body).map_err(|e| BudgetError::InvalidConfig(format!("request body is not JSON: {e}")))?;
+    let v: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|e| BudgetError::InvalidConfig(format!("request body is not JSON: {e}")))?;
     let model = v
         .get("model")
         .and_then(serde_json::Value::as_str)
@@ -233,9 +237,8 @@ where
     }
 
     fn call(&mut self, req: Req) -> Self::Future {
-        let hold = (self.layer.estimate)(&req).and_then(|(model, estimate)| {
-            self.layer.budget.reserve_for(&model, &estimate).map(|hold| (model, hold))
-        });
+        let hold = (self.layer.estimate)(&req)
+            .and_then(|(model, estimate)| self.layer.budget.reserve_for(&model, &estimate).map(|hold| (model, hold)));
         let (model, hold) = match hold {
             Ok(h) => h,
             // Refused before the inner service sees the request.

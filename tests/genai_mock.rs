@@ -18,7 +18,9 @@ async fn mock_server(status: u16, body: &'static str) -> String {
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         loop {
-            let Ok((mut sock, _)) = listener.accept().await else { return };
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
             tokio::spawn(async move {
                 let mut buf = Vec::new();
                 let mut chunk = [0u8; 4096];
@@ -57,13 +59,15 @@ async fn mock_server(status: u16, body: &'static str) -> String {
 }
 
 fn client(base: String) -> Client {
-    let resolver = ServiceTargetResolver::from_resolver_fn(move |t: ServiceTarget| -> Result<ServiceTarget, genai::resolver::Error> {
-        Ok(ServiceTarget {
-            endpoint: Endpoint::from_owned(base.clone()),
-            auth: AuthData::from_single("test-key"),
-            model: ModelIden::new(AdapterKind::OpenAI, t.model.model_name),
-        })
-    });
+    let resolver = ServiceTargetResolver::from_resolver_fn(
+        move |t: ServiceTarget| -> Result<ServiceTarget, genai::resolver::Error> {
+            Ok(ServiceTarget {
+                endpoint: Endpoint::from_owned(base.clone()),
+                auth: AuthData::from_single("test-key"),
+                model: ModelIden::new(AdapterKind::OpenAI, t.model.model_name),
+            })
+        },
+    );
     Client::builder().with_service_target_resolver(resolver).build().unwrap()
 }
 
@@ -81,9 +85,8 @@ async fn exec_chat_reserves_calls_and_books_reported_usage() {
 
     let (res, outcome) = budgeted::exec_chat(&client, &budget, "gpt-4o-mini", req, Some(&opts)).await.unwrap();
     assert_eq!(res.first_text(), Some("Rayleigh scattering."));
-    let expected = PriceTable::builtin()
-        .cost_usage("gpt-4o-mini", &Usage::new(120_000, 20_000).with_cache_read(100_000))
-        .unwrap();
+    let expected =
+        PriceTable::builtin().cost_usage("gpt-4o-mini", &Usage::new(120_000, 20_000).with_cache_read(100_000)).unwrap();
     assert!((outcome.recorded_usd - expected).abs() < 1e-9, "{} vs {expected}", outcome.recorded_usd);
     assert!((budget.spent_usd() - expected).abs() < 1e-9);
     assert_eq!(budget.reserved_usd(), 0.0);

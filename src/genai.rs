@@ -69,10 +69,8 @@ impl From<&::genai::chat::Usage> for Usage {
         let details = u.prompt_tokens_details.as_ref();
         let cached = n(details.and_then(|d| d.cached_tokens)).min(input);
         let write = details.map_or(0, |d| {
-            let by_ttl = d
-                .cache_creation_details
-                .as_ref()
-                .map_or(0, |c| n(c.ephemeral_5m_tokens) + n(c.ephemeral_1h_tokens));
+            let by_ttl =
+                d.cache_creation_details.as_ref().map_or(0, |c| n(c.ephemeral_5m_tokens) + n(c.ephemeral_1h_tokens));
             n(d.cache_creation_tokens).max(by_ttl)
         });
         Usage {

@@ -32,9 +32,8 @@ async fn main() -> Result<(), BudgetError> {
 
     for (model, body) in calls {
         let usage = Usage::from_json(body)?;
-        let without_cache = llm_budget::PriceTable::builtin()
-            .require(model)?
-            .cost(usage.input_tokens, usage.output_tokens);
+        let without_cache =
+            llm_budget::PriceTable::builtin().require(model)?.cost(usage.input_tokens, usage.output_tokens);
         let r = agent.charge_usage(model, &usage, None, None).await?;
         println!(
             "{model:<18} {:>6} in ({:>6} cached) {:>4} out: ${:.5} (${:.5} without the cache discount)",

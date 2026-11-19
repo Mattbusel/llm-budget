@@ -20,8 +20,15 @@ jobs:
         run: cargo build --all-features
       - name: Test
         run: cargo test --all-features
+      - name: Format
+        run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --all-features -- -D warnings
+      - name: Spend audit CLI
+        run: |
+          printf '%s
+' '{"model":"gpt-4o","usage":{"prompt_tokens":1000,"completion_tokens":100}}' > /tmp/calls.jsonl
+          cargo run --bin llm-budget -- audit /tmp/calls.jsonl --cap 1
       - name: Docs
         run: cargo doc --no-deps --all-features
         env:

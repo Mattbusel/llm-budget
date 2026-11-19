@@ -159,6 +159,35 @@ pub enum BudgetError {
         /// Why no price was found.
         status: crate::pricing::PriceStatus,
     },
+
+    /// The call read from (`kind` = `"read"`) or wrote to (`"write"`) the
+    /// prompt cache, and the model's price lists no rate for that. Cache
+    /// tokens are never billed at a guessed rate.
+    #[error("Model '{model}' has no cache-{kind} price, and this call has cache-{kind} tokens; refusing to guess")]
+    CachePriceMissing {
+        /// The model that was asked for.
+        model: String,
+        /// `"read"` or `"write"`.
+        kind: &'static str,
+    },
+
+    /// The model's price was last checked against its source longer ago than
+    /// the budget allows
+    /// ([`AgentBudgetBuilder::max_price_age_days`](crate::AgentBudgetBuilder::max_price_age_days)).
+    /// Update the price data (`cargo update -p llm-prices`, or a newer
+    /// llm-budget), raise the limit, or opt out loudly with
+    /// [`AgentBudgetBuilder::allow_stale_prices`](crate::AgentBudgetBuilder::allow_stale_prices).
+    #[error("Price of '{model}' was last checked {checked} ({age_days} days ago), past the {max_age_days}-day limit; update llm-prices (cargo update -p llm-prices) or opt out with allow_stale_prices()")]
+    StalePrice {
+        /// The model that was asked for.
+        model: String,
+        /// The date the price was last checked (`YYYY-MM-DD`).
+        checked: String,
+        /// How many days ago that was.
+        age_days: i64,
+        /// The most the budget allows.
+        max_age_days: u32,
+    },
 }
 
 #[cfg(test)]
@@ -167,32 +196,20 @@ mod tests {
 
     #[test]
     fn test_agent_exhausted_display_contains_agent_id() {
-        let e = BudgetError::AgentExhausted {
-            agent_id: "agent-42".into(),
-            spent: 1.5,
-            limit: 1.0,
-        };
+        let e = BudgetError::AgentExhausted { agent_id: "agent-42".into(), spent: 1.5, limit: 1.0 };
         assert!(e.to_string().contains("agent-42"));
         assert!(e.to_string().contains("1.5"));
     }
 
     #[test]
     fn test_task_exhausted_display() {
-        let e = BudgetError::TaskExhausted {
-            task_id: "task-7".into(),
-            spent: 0.05,
-            limit: 0.04,
-        };
+        let e = BudgetError::TaskExhausted { task_id: "task-7".into(), spent: 0.05, limit: 0.04 };
         assert!(e.to_string().contains("task-7"));
     }
 
     #[test]
     fn test_session_exhausted_display() {
-        let e = BudgetError::SessionExhausted {
-            session_id: "sess-1".into(),
-            spent: 2.0,
-            limit: 1.0,
-        };
+        let e = BudgetError::SessionExhausted { session_id: "sess-1".into(), spent: 2.0, limit: 1.0 };
         assert!(e.to_string().contains("sess-1"));
     }
 
@@ -204,21 +221,14 @@ mod tests {
 
     #[test]
     fn test_kill_switch_display() {
-        let e = BudgetError::KillSwitchActivated {
-            agent_id: "a1".into(),
-            reason: "hard limit breach".into(),
-        };
+        let e = BudgetError::KillSwitchActivated { agent_id: "a1".into(), reason: "hard limit breach".into() };
         assert!(e.to_string().contains("a1"));
         assert!(e.to_string().contains("hard limit breach"));
     }
 
     #[test]
     fn test_model_downgraded_display() {
-        let e = BudgetError::ModelDowngraded {
-            from: ModelTier::Premium,
-            to: ModelTier::Standard,
-            remaining: 0.01,
-        };
+        let e = BudgetError::ModelDowngraded { from: ModelTier::Premium, to: ModelTier::Standard, remaining: 0.01 };
         assert!(e.to_string().contains("downgraded"));
     }
 
@@ -230,23 +240,14 @@ mod tests {
 
     #[test]
     fn test_allocation_failed_display() {
-        let e = BudgetError::AllocationFailed {
-            agent_id: "a1".into(),
-            requested: 10.0,
-            available: 5.0,
-        };
+        let e = BudgetError::AllocationFailed { agent_id: "a1".into(), requested: 10.0, available: 5.0 };
         assert!(e.to_string().contains("a1"));
         assert!(e.to_string().contains("10"));
     }
 
     #[test]
     fn test_reallocation_failed_display() {
-        let e = BudgetError::ReallocationFailed {
-            from: "a1".into(),
-            to: "a2".into(),
-            amount: 1.0,
-            available: 0.5,
-        };
+        let e = BudgetError::ReallocationFailed { from: "a1".into(), to: "a2".into(), amount: 1.0, available: 0.5 };
         assert!(e.to_string().contains("a1"));
         assert!(e.to_string().contains("a2"));
     }

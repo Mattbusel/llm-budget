@@ -36,8 +36,7 @@ pub fn count_tokens(model: &str, text: &str) -> TokenCount {
         Some(t) => (t, true),
         None => (Tokenizer::O200kBase, false),
     };
-    let bpe = tiktoken_rs::bpe_for_tokenizer(tokenizer)
-        .unwrap_or_else(|_| tiktoken_rs::o200k_base_singleton());
+    let bpe = tiktoken_rs::bpe_for_tokenizer(tokenizer).unwrap_or_else(|_| tiktoken_rs::o200k_base_singleton());
     TokenCount { tokens: bpe.encode_ordinary(text).len(), exact }
 }
 
@@ -68,9 +67,8 @@ impl crate::budget::AgentBudget {
         task_id: Option<String>,
         session_id: Option<String>,
     ) -> Result<crate::budget::ChargeReceipt, BudgetError> {
-        let to_u32 = |n: usize| {
-            u32::try_from(n).map_err(|_| BudgetError::InvalidConfig("text too long to count".into()))
-        };
+        let to_u32 =
+            |n: usize| u32::try_from(n).map_err(|_| BudgetError::InvalidConfig("text too long to count".into()));
         let input = to_u32(count_tokens(model, prompt).tokens)?;
         let output = to_u32(count_tokens(model, completion).tokens)?;
         self.charge_model(model, input, output, task_id, session_id).await
@@ -116,10 +114,7 @@ mod tests {
     #[tokio::test]
     async fn charge_model_text_charges_counted_tokens() {
         let agent = crate::AgentBudget::new("a", 1.0, crate::ModelTier::Standard, 0.1).expect("new");
-        let r = agent
-            .charge_model_text("gpt-4o", "Hello, world!", "", None, None)
-            .await
-            .expect("charge");
+        let r = agent.charge_model_text("gpt-4o", "Hello, world!", "", None, None).await.expect("charge");
         assert!((r.cost_usd - 0.00001).abs() < 1e-12, "{}", r.cost_usd);
         let log = agent.audit_log().await;
         assert_eq!(log[0].input_tokens, 4);

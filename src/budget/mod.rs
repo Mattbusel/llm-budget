@@ -50,6 +50,7 @@
 use crate::error::BudgetError;
 use crate::model::{ModelCascade, ModelTier};
 use crate::pricing::{PriceAction, PriceStatus, PriceTable, UnpricedPolicy};
+use crate::safety::{Safety, UnsafeEvent, UnsafeKind, UnsafeSink};
 use std::collections::VecDeque;
 
 pub mod scope;
@@ -343,6 +344,14 @@ impl AtomicBudget {
         }
     }
 
+    /// Hold `nanos` of headroom whatever the limit says (the soft-limit
+    /// opt-out). Returns the committed total afterwards.
+    pub(crate) fn reserve_nanos_force(&self, nanos: u64) -> u64 {
+        let committed = self.committed_nanos.fetch_add(nanos, Ordering::SeqCst).saturating_add(nanos);
+        self.reserved_nanos.fetch_add(nanos, Ordering::SeqCst);
+        committed
+    }
+
     /// Hold `nanos` of headroom. Returns `Err(spent_usd)` if it does not fit.
     pub(crate) fn reserve_nanos(&self, nanos: u64) -> Result<(), f64> {
         // Reserved is raised after committed, and lowered before it, so
@@ -362,10 +371,7 @@ impl AtomicBudget {
         let mut current = self.committed_nanos.load(Ordering::SeqCst);
         loop {
             let next = current.saturating_sub(reserved).saturating_add(actual);
-            match self
-                .committed_nanos
-                .compare_exchange_weak(current, next, Ordering::SeqCst, Ordering::SeqCst)
-            {
+            match self.committed_nanos.compare_exchange_weak(current, next, Ordering::SeqCst, Ordering::SeqCst) {
                 Ok(_) => return next,
                 Err(seen) => current = seen,
             }
@@ -390,11 +396,7 @@ impl AtomicBudget {
                 return Err(nanos_to_usd(remaining));
             }
             let new_limit = limit - amount;
-            if self
-                .limit_nanos
-                .compare_exchange_weak(limit, new_limit, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
-            {
+            if self.limit_nanos.compare_exchange_weak(limit, new_limit, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
                 // Store-then-load on both sides: if a charge slipped in, give the room back.
                 if self.committed_nanos.load(Ordering::SeqCst) > new_limit {
                     self.limit_nanos.fetch_add(amount, Ordering::SeqCst);
@@ -596,6 +598,18 @@ impl BudgetEnvelope {
         Ok(())
     }
 
+    /// Reserve `nanos` past the cap (the soft-limit opt-out). A killed or
+    /// closed scope still refuses. Returns the committed total in USD.
+    pub(crate) fn hold_force(&self, nanos: u64) -> Result<f64, BudgetError> {
+        self.check_alive()?;
+        let committed = self.inner.reserve_nanos_force(nanos);
+        if let Err(e) = self.check_alive() {
+            self.release(nanos);
+            return Err(e);
+        }
+        Ok(nanos_to_usd(committed))
+    }
+
     /// Book `record.cost_usd` whatever the cap or the kill switch say, and log
     /// it: for spend that has already happened. Negative, NaN and infinite
     /// amounts book $0.
@@ -785,10 +799,12 @@ pub struct AgentBudget {
     depth: u32,
     /// The deepest child scope this tree allows.
     max_depth: u32,
+    /// Fail-closed settings and the unsafe-event sink, shared by the tree.
+    safety: Arc<Safety>,
 }
 
 /// Builds an [`AgentBudget`]; see [`AgentBudget::builder`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AgentBudgetBuilder {
     agent_id: String,
     limit_usd: f64,
@@ -798,6 +814,31 @@ pub struct AgentBudgetBuilder {
     prices: Option<Arc<PriceTable>>,
     policy: Option<UnpricedPolicy>,
     max_depth: u32,
+    soft_limit: bool,
+    allow_stale: bool,
+    max_price_age_days: u32,
+    price_check_date: Option<String>,
+    sink: Option<UnsafeSink>,
+}
+
+impl std::fmt::Debug for AgentBudgetBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentBudgetBuilder")
+            .field("agent_id", &self.agent_id)
+            .field("limit_usd", &self.limit_usd)
+            .field("tier", &self.tier)
+            .field("cascade_threshold", &self.cascade_threshold)
+            .field("audit_log", &self.audit_log)
+            .field("prices", &self.prices)
+            .field("policy", &self.policy)
+            .field("max_depth", &self.max_depth)
+            .field("soft_limit", &self.soft_limit)
+            .field("allow_stale", &self.allow_stale)
+            .field("max_price_age_days", &self.max_price_age_days)
+            .field("price_check_date", &self.price_check_date)
+            .field("sink", &self.sink.is_some())
+            .finish()
+    }
 }
 
 impl AgentBudgetBuilder {
@@ -843,10 +884,77 @@ impl AgentBudgetBuilder {
 
     /// What to do with a call whose model has no usable price, per
     /// [`PriceStatus`]; see [`UnpricedPolicy`].
-    /// Child scopes inherit it. Without one, such calls are refused with
-    /// [`BudgetError::UnknownModel`].
+    /// Child scopes inherit it. Without one, such calls are refused (with
+    /// [`BudgetError::UnknownModel`] or [`BudgetError::CachePriceMissing`]).
+    /// Every call an `Allow` or `Reserve` action lets through emits an
+    /// [`UnsafeEvent`].
     pub fn unpriced_policy(mut self, policy: UnpricedPolicy) -> Self {
         self.policy = Some(policy);
+        self
+    }
+
+    /// **Unsafe opt-out.** Let calls to models with no usable price through
+    /// (holding and booking $0 for them), and let
+    /// [`charge`](AgentBudget::charge) book tier averages. Every such call
+    /// emits an [`UnsafeEvent`]. Same as an
+    /// [`UnpricedPolicy`] of `Allow` for every status.
+    ///
+    /// A model with no price is how a cap stops meaning anything: in most
+    /// trackers the newest, most expensive model is the one booked at $0.
+    /// Prefer [`PriceTable::insert`] with the real price.
+    pub fn allow_unpriced(mut self) -> Self {
+        self.policy = Some(UnpricedPolicy::new(PriceAction::Allow, PriceAction::Allow, PriceAction::Allow));
+        self
+    }
+
+    /// **Unsafe opt-out.** Admit calls that do not fit under the cap instead
+    /// of refusing them, the way a soft limit does. Every call admitted over
+    /// the cap emits an [`UnsafeEvent`];
+    /// [`ChargeOutcome::over_cap`] still reports it. Child scopes inherit it
+    /// (creating a child still needs room in its parent). A killed or closed
+    /// budget still refuses.
+    ///
+    /// A soft limit records the overspend after it has happened. Run
+    /// `llm-budget audit` on a log of your calls to see how much a soft limit
+    /// would have let through.
+    pub fn unsafe_soft_limit(mut self) -> Self {
+        self.soft_limit = true;
+        self
+    }
+
+    /// Refuse prices last checked against their source more than `days` days
+    /// ago (default [`DEFAULT_MAX_PRICE_AGE_DAYS`](crate::safety::DEFAULT_MAX_PRICE_AGE_DAYS)),
+    /// with [`BudgetError::StalePrice`]. Prices with no known date (your own
+    /// rows without [`ModelPrice::with_checked`](crate::ModelPrice::with_checked),
+    /// a [hook](PriceTable::with_hook)) are not judged.
+    pub fn max_price_age_days(mut self, days: u32) -> Self {
+        self.max_price_age_days = days;
+        self
+    }
+
+    /// **Unsafe opt-out.** Use prices older than
+    /// [`max_price_age_days`](Self::max_price_age_days) anyway. Every call
+    /// priced from a stale row emits an [`UnsafeEvent`].
+    pub fn allow_stale_prices(mut self) -> Self {
+        self.allow_stale = true;
+        self
+    }
+
+    /// Judge price ages as of `date` (`YYYY-MM-DD`) instead of today: for
+    /// replaying old calls, and for tests. [`build`](Self::build) rejects a
+    /// date that does not parse.
+    pub fn price_check_date(mut self, date: impl Into<String>) -> Self {
+        self.price_check_date = Some(date.into());
+        self
+    }
+
+    /// Send every [`UnsafeEvent`] to `sink`
+    /// instead of standard error. Child scopes share it.
+    pub fn on_unsafe<F>(mut self, sink: F) -> Self
+    where
+        F: Fn(&UnsafeEvent) + Send + Sync + 'static,
+    {
+        self.sink = Some(Arc::new(sink));
         self
     }
 
@@ -861,12 +969,34 @@ impl AgentBudgetBuilder {
     /// Build the budget.
     ///
     /// # Errors
-    /// [`BudgetError::InvalidConfig`] for a non-positive limit, a threshold
-    /// outside 0..=1, or an [`UnpricedPolicy`] with a negative `Reserve`.
+    /// [`BudgetError::InvalidConfig`] for a limit that is not a positive,
+    /// finite number (a budget with no hard cap is not a budget), a threshold
+    /// outside 0..=1, an [`UnpricedPolicy`] with a negative `Reserve`, or a
+    /// [`price_check_date`](Self::price_check_date) that is not `YYYY-MM-DD`.
     pub fn build(self) -> Result<AgentBudget, BudgetError> {
         if let Some(p) = &self.policy {
             p.validate()?;
         }
+        if !self.limit_usd.is_finite() || self.limit_usd <= 0.0 {
+            return Err(BudgetError::InvalidConfig(format!(
+                "a budget needs a hard cap: limit must be a positive, finite USD amount, got {}",
+                self.limit_usd
+            )));
+        }
+        let today = match &self.price_check_date {
+            Some(d) => Some(crate::safety::days_from_date(d).ok_or_else(|| {
+                BudgetError::InvalidConfig(format!("price_check_date must be YYYY-MM-DD, got {d:?}"))
+            })?),
+            None => None,
+        };
+        let safety = Arc::new(Safety {
+            soft_limit: self.soft_limit,
+            allow_stale: self.allow_stale,
+            max_age_days: self.max_price_age_days,
+            today,
+            sink: self.sink,
+            ..Safety::default()
+        });
         let envelope = BudgetEnvelope::new(self.agent_id.clone(), ScopeKind::Agent, self.limit_usd)?
             .with_audit_log(self.audit_log);
         let cascade = ModelCascade::new(self.tier, self.cascade_threshold, self.limit_usd)?;
@@ -878,6 +1008,7 @@ impl AgentBudgetBuilder {
             policy: self.policy,
             depth: 0,
             max_depth: self.max_depth,
+            safety,
         })
     }
 }
@@ -896,10 +1027,7 @@ impl AgentBudget {
         initial_tier: ModelTier,
         cascade_threshold: f64,
     ) -> Result<Self, BudgetError> {
-        Self::builder(agent_id, limit_usd)
-            .tier(initial_tier)
-            .cascade_threshold(cascade_threshold)
-            .build()
+        Self::builder(agent_id, limit_usd).tier(initial_tier).cascade_threshold(cascade_threshold).build()
     }
 
     /// Start building an agent budget with a `limit_usd` cap.
@@ -925,6 +1053,11 @@ impl AgentBudget {
             prices: None,
             policy: None,
             max_depth: DEFAULT_MAX_DEPTH,
+            soft_limit: false,
+            allow_stale: false,
+            max_price_age_days: crate::safety::DEFAULT_MAX_PRICE_AGE_DAYS,
+            price_check_date: None,
+            sink: None,
         }
     }
 
@@ -932,10 +1065,21 @@ impl AgentBudget {
     /// average). Returns `(total_spent, Some(tier))` when the agent was just
     /// downgraded.
     ///
-    /// Prefer [`charge_model`](Self::charge_model) when you know the model name.
+    /// A tier average is a guess, not a price, so since 0.10 this is refused
+    /// unless the budget opted out with
+    /// [`allow_unpriced`](AgentBudgetBuilder::allow_unpriced) (or an
+    /// [`UnpricedPolicy`] that does not deny [`PriceStatus::Missing`]); every
+    /// call then emits an [`UnsafeEvent`]. Use
+    /// [`charge_model`](Self::charge_model) or
+    /// [`reserve_for`](Self::reserve_for) with the model name.
     ///
     /// # Errors
-    /// See [`BudgetEnvelope::charge`].
+    /// [`BudgetError::Unpriced`] without the opt-out, otherwise see
+    /// [`BudgetEnvelope::charge`].
+    #[deprecated(
+        since = "0.10.0",
+        note = "a tier average is a guessed price; use charge_model or reserve_for/settle_usage"
+    )]
     pub async fn charge(
         &self,
         input_tokens: u32,
@@ -943,7 +1087,22 @@ impl AgentBudget {
         task_id: Option<String>,
         session_id: Option<String>,
     ) -> Result<(f64, Option<ModelTier>), BudgetError> {
-        let r = self.charge_inner(None, None, input_tokens, output_tokens, task_id, session_id).await?;
+        let tier = lock(&self.cascade).current();
+        let allowed = matches!(
+            self.policy.as_ref().and_then(|p| p.action(PriceStatus::Missing)),
+            Some(PriceAction::Allow | PriceAction::Reserve(_))
+        );
+        if !allowed {
+            let e = BudgetError::Unpriced { model: format!("{tier:?}-tier average"), status: PriceStatus::Missing };
+            crate::observe::refused(&self.agent_id, false, &e.to_string());
+            return Err(e);
+        }
+        let cost = nanos_to_usd(usd_to_nanos(tier.estimate_cost(input_tokens, output_tokens)));
+        let r = self.charge_inner(None, Some(cost), input_tokens, output_tokens, task_id, session_id).await?;
+        self.safety.emit(UnsafeEvent {
+            agent_id: self.agent_id.clone(),
+            kind: UnsafeKind::TierEstimate { tier, cost_usd: cost },
+        });
         Ok((r.total_spent_usd, r.downgraded_to))
     }
 
@@ -952,8 +1111,9 @@ impl AgentBudget {
     /// [`AgentBudgetBuilder::price_table`]).
     ///
     /// # Errors
-    /// [`BudgetError::UnknownModel`] if the model is not in the table, otherwise
-    /// see [`BudgetEnvelope::charge`].
+    /// [`BudgetError::UnknownModel`] if the model is not in the table,
+    /// [`BudgetError::StalePrice`] if its price is too old, otherwise see
+    /// [`BudgetEnvelope::charge`].
     pub async fn charge_model(
         &self,
         model: &str,
@@ -962,9 +1122,9 @@ impl AgentBudget {
         task_id: Option<String>,
         session_id: Option<String>,
     ) -> Result<ChargeReceipt, BudgetError> {
-        let cost = self.price_table().cost(model, u64::from(input_tokens), u64::from(output_tokens))?;
-        self.charge_inner(Some(model), Some(cost), input_tokens, output_tokens, task_id, session_id)
-            .await
+        let usage = crate::usage::Usage::new(u64::from(input_tokens), u64::from(output_tokens));
+        let (cost, _) = self.price_or_policy(model, &usage)?;
+        self.charge_inner(Some(model), Some(cost), input_tokens, output_tokens, task_id, session_id).await
     }
 
     /// Like [`charge_model`](Self::charge_model) with your own [`PriceTable`].
@@ -981,8 +1141,8 @@ impl AgentBudget {
         session_id: Option<String>,
     ) -> Result<ChargeReceipt, BudgetError> {
         let cost = table.require(model)?.cost(u64::from(input_tokens), u64::from(output_tokens));
-        self.charge_inner(Some(model), Some(cost), input_tokens, output_tokens, task_id, session_id)
-            .await
+        self.check_fresh(model, table.require(model)?.checked.as_deref())?;
+        self.charge_inner(Some(model), Some(cost), input_tokens, output_tokens, task_id, session_id).await
     }
 
     /// Charge a call from the usage block the provider returned (see
@@ -991,7 +1151,8 @@ impl AgentBudget {
     /// cap; for a call that already happened prefer [`record`](Self::record).
     ///
     /// # Errors
-    /// [`BudgetError::UnknownModel`], otherwise see [`BudgetEnvelope::charge`].
+    /// [`BudgetError::UnknownModel`], [`BudgetError::CachePriceMissing`],
+    /// [`BudgetError::StalePrice`], otherwise see [`BudgetEnvelope::charge`].
     pub async fn charge_usage(
         &self,
         model: &str,
@@ -999,10 +1160,17 @@ impl AgentBudget {
         task_id: Option<String>,
         session_id: Option<String>,
     ) -> Result<ChargeReceipt, BudgetError> {
-        let cost = self.price_table().cost_usage(model, usage)?;
+        let (cost, _) = self.price_or_policy(model, usage)?;
         let clamp = |n: u64| u32::try_from(n).unwrap_or(u32::MAX);
-        self.charge_inner(Some(model), Some(cost), clamp(usage.input_tokens), clamp(usage.output_tokens), task_id, session_id)
-            .await
+        self.charge_inner(
+            Some(model),
+            Some(cost),
+            clamp(usage.input_tokens),
+            clamp(usage.output_tokens),
+            task_id,
+            session_id,
+        )
+        .await
     }
 
     /// Charge an exact dollar amount (for example the cost your provider reported).
@@ -1114,6 +1282,47 @@ impl AgentBudget {
         Ok(self.charge_usd_force(cost, fill_ctx(ctx, model, usage)))
     }
 
+    /// Refuse (or, with the opt-out, report) a price checked too long ago.
+    fn check_fresh(&self, model: &str, checked: Option<&str>) -> Result<(), BudgetError> {
+        let Some(checked) = checked else {
+            return Ok(());
+        };
+        let Some(age_days) = self.safety.age_days(checked) else {
+            return Ok(());
+        };
+        if age_days <= i64::from(self.safety.max_age_days) {
+            return Ok(());
+        }
+        if self.safety.allow_stale {
+            self.safety.emit(UnsafeEvent {
+                agent_id: self.agent_id.clone(),
+                kind: UnsafeKind::StalePriceUsed { model: model.to_string(), checked: checked.to_string(), age_days },
+            });
+            return Ok(());
+        }
+        let e = BudgetError::StalePrice {
+            model: model.to_string(),
+            checked: checked.to_string(),
+            age_days,
+            max_age_days: self.safety.max_age_days,
+        };
+        crate::observe::refused(&self.agent_id, false, &e.to_string());
+        Err(e)
+    }
+
+    /// How many [`UnsafeEvent`]s this budget's
+    /// tree has emitted: calls an opt-out let through that the fail-closed
+    /// default would have refused. Shared by a root and its child scopes.
+    pub fn unsafe_events(&self) -> u64 {
+        self.safety.events.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// True when the budget was built with
+    /// [`unsafe_soft_limit`](AgentBudgetBuilder::unsafe_soft_limit).
+    pub fn is_soft_limit(&self) -> bool {
+        self.safety.soft_limit
+    }
+
     /// Why `model` can or cannot be priced for `usage` at this agent's
     /// prices (see [`PriceTable::lookup`]).
     pub fn price_status(&self, model: &str, usage: &crate::usage::Usage) -> PriceStatus {
@@ -1128,16 +1337,34 @@ impl AgentBudget {
     /// The cost of `usage` on `model`, or what the [`UnpricedPolicy`] says to
     /// hold or book when it has no usable price.
     fn price_or_policy(&self, model: &str, usage: &crate::usage::Usage) -> Result<(f64, PriceStatus), BudgetError> {
-        let found = self.price_table().lookup(model, usage);
+        let table = self.price_table();
+        let found = table.lookup(model, usage);
         if let Some(usd) = found.cost_usd {
+            self.check_fresh(model, table.checked_date(model, usage))?;
             return Ok((usd, PriceStatus::Exact));
         }
         let status = found.status;
         let action = self.policy.as_ref().and_then(|p| p.action(status));
+        let allowed = |held_usd: f64| -> Result<(f64, PriceStatus), BudgetError> {
+            self.safety.emit(UnsafeEvent {
+                agent_id: self.agent_id.clone(),
+                kind: UnsafeKind::UnpricedAllowed { model: model.to_string(), status, held_usd },
+            });
+            Ok((held_usd, status))
+        };
         match action {
-            None => Err(BudgetError::UnknownModel(model.to_string())),
-            Some(PriceAction::Allow) => Ok((0.0, status)),
-            Some(PriceAction::Reserve(usd)) => Ok((usd, status)),
+            None => {
+                // The most specific reason: unknown id, missing cache rate, or
+                // a listed model without the price this call needs.
+                let e = match table.cost_usage(model, usage) {
+                    Err(e @ (BudgetError::CachePriceMissing { .. } | BudgetError::Unpriced { .. })) => e,
+                    _ => BudgetError::UnknownModel(model.to_string()),
+                };
+                crate::observe::refused(&self.agent_id, false, &e.to_string());
+                Err(e)
+            }
+            Some(PriceAction::Allow) => allowed(0.0),
+            Some(PriceAction::Reserve(usd)) => allowed(usd),
             Some(PriceAction::Deny) => {
                 let e = BudgetError::Unpriced { model: model.to_string(), status };
                 crate::observe::refused(&self.agent_id, false, &e.to_string());
@@ -1202,10 +1429,18 @@ impl AgentBudget {
         }
         let nanos = usd_to_nanos(estimate_usd);
         if let Err(e) = self.envelope.hold(nanos) {
-            if !matches!(e, BudgetError::ScopeClosed { .. } | BudgetError::KillSwitchActivated { .. }) {
-                crate::observe::refused(&self.agent_id, false, &e.to_string());
+            if self.safety.soft_limit && is_exhausted(&e) {
+                let committed_usd = self.envelope.hold_force(nanos)?;
+                self.safety.emit(UnsafeEvent {
+                    agent_id: self.agent_id.clone(),
+                    kind: UnsafeKind::SoftLimitOverrun { limit_usd: self.envelope.limit_usd(), committed_usd },
+                });
+            } else {
+                if !matches!(e, BudgetError::ScopeClosed { .. } | BudgetError::KillSwitchActivated { .. }) {
+                    crate::observe::refused(&self.agent_id, false, &e.to_string());
+                }
+                return Err(e);
             }
-            return Err(e);
         }
         Ok(Reservation {
             agent_id: self.agent_id.clone(),
@@ -1245,8 +1480,19 @@ impl AgentBudget {
             timestamp_ms: now_ms(),
         };
 
+        let soft = self.safety.soft_limit.then(|| record.clone());
         let total = match self.envelope.charge(record).await {
             Ok(total) => total,
+            Err(e) if is_exhausted(&e) && soft.is_some() => {
+                let Some(record) = soft else { return Err(e) };
+                let committed_usd = self.envelope.hold_force(usd_to_nanos(record.cost_usd))?;
+                self.safety.emit(UnsafeEvent {
+                    agent_id: self.agent_id.clone(),
+                    kind: UnsafeKind::SoftLimitOverrun { limit_usd: self.envelope.limit_usd(), committed_usd },
+                });
+                let nanos = usd_to_nanos(record.cost_usd);
+                self.envelope.book(record, nanos).0
+            }
             Err(e) => {
                 let killed = matches!(e, BudgetError::KillSwitchActivated { .. });
                 crate::observe::refused(&self.agent_id, killed, &e.to_string());
@@ -1510,16 +1756,33 @@ impl std::fmt::Debug for Reservation {
     }
 }
 
+/// The error says the cap was reached (not a kill, a close or bad input).
+fn is_exhausted(e: &BudgetError) -> bool {
+    matches!(
+        e,
+        BudgetError::AgentExhausted { .. } | BudgetError::TaskExhausted { .. } | BudgetError::SessionExhausted { .. }
+    )
+}
+
 pub(crate) fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An agent that opted out of fail-closed pricing, for the tier-average
+    /// `charge` tests, with the unsafe events counted and kept off stderr.
+    fn tier_agent(id: &str, limit: f64, tier: ModelTier, threshold: f64) -> AgentBudget {
+        AgentBudget::builder(id, limit)
+            .tier(tier)
+            .cascade_threshold(threshold)
+            .allow_unpriced()
+            .on_unsafe(|_| {})
+            .build()
+            .expect("new")
+    }
 
     // ── AtomicBudget tests ─────────────────────────────────────────────────
 
@@ -1576,9 +1839,7 @@ mod tests {
         let mut handles = vec![];
         for _ in 0..10 {
             let b2 = b.clone();
-            handles.push(std::thread::spawn(move || {
-                b2.charge(9.0)
-            }));
+            handles.push(std::thread::spawn(move || b2.charge(9.0)));
         }
         let results: Vec<_> = handles.into_iter().map(|h| h.join().expect("join")).collect();
         // Exactly 11 charges of 9.0 = 99.0 fit, 12th = 108.0 over
@@ -1645,10 +1906,11 @@ mod tests {
 
     // ── AgentBudget tests ──────────────────────────────────────────────────
 
+    #[allow(deprecated)]
     #[tokio::test]
     async fn test_agent_budget_charge_triggers_cascade() {
         // Budget = 1.0, threshold = 0.2 (downgrade when < 20% remaining)
-        let agent = AgentBudget::new("a1", 1.0, ModelTier::Premium, 0.2).expect("new");
+        let agent = tier_agent("a1", 1.0, ModelTier::Premium, 0.2);
         // Premium: $0.015/1K input, $0.075/1K output
         // 60000 input + 1000 output = $0.90 + $0.075 = $0.975 (within $1.0 limit)
         // remaining = $0.025 < $0.20 (20% threshold)
@@ -1657,9 +1919,10 @@ mod tests {
         assert!(remaining < 0.2); // threshold was 20% of 1.0 = 0.2
     }
 
+    #[allow(deprecated)]
     #[tokio::test]
     async fn test_agent_budget_kill_prevents_charges() {
-        let agent = AgentBudget::new("a1", 10.0, ModelTier::Standard, 0.1).expect("new");
+        let agent = tier_agent("a1", 10.0, ModelTier::Standard, 0.1);
         agent.kill("hard limit test");
         let result = agent.charge(100, 50, None, None).await;
         assert!(matches!(result, Err(BudgetError::KillSwitchActivated { .. })));
@@ -1675,9 +1938,10 @@ mod tests {
         assert!(!snap.is_killed);
     }
 
+    #[allow(deprecated)]
     #[tokio::test]
     async fn test_agent_budget_charge_zero_cost_local_tier() {
-        let agent = AgentBudget::new("local", 1.0, ModelTier::Local, 0.1).expect("new");
+        let agent = tier_agent("local", 1.0, ModelTier::Local, 0.1);
         // Local tier has zero cost, so many charges should succeed
         for _ in 0..100 {
             agent.charge(1000, 500, None, None).await.expect("local is free");
@@ -1735,12 +1999,15 @@ mod tests {
         assert!(b.charge(1.0).is_ok());
     }
 
+    #[allow(deprecated)]
     #[tokio::test]
     async fn test_kill_reason_is_reported() {
-        let agent = AgentBudget::new("a1", 10.0, ModelTier::Standard, 0.1).expect("new");
+        let agent = tier_agent("a1", 10.0, ModelTier::Standard, 0.1);
         agent.kill("runaway loop");
         match agent.charge(1, 1, None, None).await {
-            Err(BudgetError::KillSwitchActivated { reason, .. }) => assert_eq!(reason, "runaway loop"),
+            Err(BudgetError::KillSwitchActivated { reason, .. }) => {
+                assert_eq!(reason, "runaway loop")
+            }
             other => panic!("expected kill switch error, got {other:?}"),
         }
     }
@@ -1754,10 +2021,7 @@ mod tests {
         assert!((agent.spent_usd() - 0.15).abs() < 1e-9);
         let log = agent.audit_log().await;
         assert_eq!(log[0].model.as_deref(), Some("gpt-4o-mini"));
-        assert!(matches!(
-            agent.charge_model("not-a-model", 1, 1, None, None).await,
-            Err(BudgetError::UnknownModel(_))
-        ));
+        assert!(matches!(agent.charge_model("not-a-model", 1, 1, None, None).await, Err(BudgetError::UnknownModel(_))));
     }
 
     #[tokio::test]

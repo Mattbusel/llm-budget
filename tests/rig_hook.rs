@@ -89,12 +89,8 @@ async fn a_killed_budget_stops_before_the_first_call() {
     let b = budget(1.0);
     b.kill("manual stop");
     let model = MockCompletionModel::from_turns([MockTurn::text("never sent")]);
-    let err = AgentBuilder::new(model)
-        .add_hook(BudgetHook::new(b.clone(), "gpt-4o"))
-        .build()
-        .prompt("go")
-        .await
-        .unwrap_err();
+    let err =
+        AgentBuilder::new(model).add_hook(BudgetHook::new(b.clone(), "gpt-4o")).build().prompt("go").await.unwrap_err();
     assert!(err.to_string().contains("killed"), "{err}");
     assert_eq!(b.spent_usd(), 0.0);
 }
@@ -146,13 +142,8 @@ async fn cache_reads_are_charged_at_the_cache_price() {
     let b = budget(1.0);
     let usage = RigUsage::new().input_tokens(2_100).output_tokens(50).cached_input_tokens(2_000);
     let model = MockCompletionModel::from_turns([MockTurn::text("ok").with_usage(usage)]);
-    AgentBuilder::new(model)
-        .add_hook(BudgetHook::new(b.clone(), "gpt-4o"))
-        .build()
-        .prompt("go")
-        .await
-        .unwrap();
-    let expected = PriceTable::builtin().require("gpt-4o").unwrap().cost_usage(&Usage::from(&usage));
+    AgentBuilder::new(model).add_hook(BudgetHook::new(b.clone(), "gpt-4o")).build().prompt("go").await.unwrap();
+    let expected = PriceTable::builtin().require("gpt-4o").unwrap().cost_usage(&Usage::from(&usage)).unwrap();
     let full = PriceTable::builtin().require("gpt-4o").unwrap().cost(2_100, 50);
     assert!((b.spent_usd() - expected).abs() < 1e-9);
     assert!(b.spent_usd() < full);
@@ -164,10 +155,7 @@ async fn cache_reads_are_charged_at_the_cache_price() {
 #[tokio::test]
 async fn a_provider_reported_cost_wins_over_the_table() {
     let b = budget(1.0);
-    let usage = RigUsage::new()
-        .input_tokens(1_000)
-        .output_tokens(100)
-        .cost(Cost::from_parts(0.01, 0.002, 0.0, 0.0));
+    let usage = RigUsage::new().input_tokens(1_000).output_tokens(100).cost(Cost::from_parts(0.01, 0.002, 0.0, 0.0));
     let model = MockCompletionModel::from_turns([MockTurn::text("ok").with_usage(usage)]);
     AgentBuilder::new(model)
         .add_hook(BudgetHook::new(b.clone(), "some-model-not-in-the-table"))
@@ -185,11 +173,7 @@ async fn runs_sharing_a_budget_book_every_paid_turn() {
     let mut stopped = 0;
     for _ in 0..5 {
         let model = MockCompletionModel::from_turns([MockTurn::text("ok").with_usage(three_cent_turn())]);
-        let r = AgentBuilder::new(model)
-            .add_hook(BudgetHook::new(b.clone(), "gpt-4o"))
-            .build()
-            .prompt("go")
-            .await;
+        let r = AgentBuilder::new(model).add_hook(BudgetHook::new(b.clone(), "gpt-4o")).build().prompt("go").await;
         match r {
             Ok(answer) => answers.push(answer),
             Err(_) => stopped += 1,

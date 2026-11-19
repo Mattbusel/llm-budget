@@ -59,13 +59,17 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-pub mod budget;
+pub mod audit;
 #[cfg(feature = "borg")]
 #[cfg_attr(docsrs, doc(cfg(feature = "borg")))]
 pub mod borg;
+pub mod budget;
 pub mod context;
 pub mod error;
 pub mod fleet;
+#[cfg(feature = "genai")]
+#[cfg_attr(docsrs, doc(cfg(feature = "genai")))]
+pub mod genai;
 #[cfg(feature = "metrics-layer")]
 #[cfg_attr(docsrs, doc(cfg(feature = "metrics-layer")))]
 pub mod metrics_layer;
@@ -74,9 +78,6 @@ pub mod observe;
 #[cfg(feature = "async-openai")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async-openai")))]
 pub mod openai;
-#[cfg(feature = "genai")]
-#[cfg_attr(docsrs, doc(cfg(feature = "genai")))]
-pub mod genai;
 #[cfg(feature = "store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "store")))]
 pub mod persistence;
@@ -84,19 +85,20 @@ pub mod pricing;
 #[cfg(feature = "ratelimit")]
 #[cfg_attr(docsrs, doc(cfg(feature = "ratelimit")))]
 pub mod ratelimit;
-pub mod semconv;
 #[cfg(feature = "rig")]
 #[cfg_attr(docsrs, doc(cfg(feature = "rig")))]
 pub mod rig;
+pub mod safety;
+pub mod semconv;
 #[cfg(feature = "tokens")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tokens")))]
 pub mod tokens;
-#[cfg(feature = "tracing-layer")]
-#[cfg_attr(docsrs, doc(cfg(feature = "tracing-layer")))]
-pub mod tracing_layer;
 #[cfg(feature = "tower")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tower")))]
 pub mod tower_layer;
+#[cfg(feature = "tracing-layer")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tracing-layer")))]
+pub mod tracing_layer;
 pub mod usage;
 
 pub use budget::{
@@ -110,4 +112,5 @@ pub use model::{ModelCascade, ModelTier};
 #[cfg_attr(docsrs, doc(cfg(feature = "store")))]
 pub use persistence::BudgetStore;
 pub use pricing::{ModelPrice, PriceAction, PriceStatus, PriceTable, UnpricedPolicy};
+pub use safety::{UnsafeEvent, UnsafeKind, DEFAULT_MAX_PRICE_AGE_DAYS};
 pub use usage::Usage;

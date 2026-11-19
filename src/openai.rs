@@ -53,11 +53,8 @@ use async_openai::types::chat::{
 /// tokens when neither is set, so set one to reserve for the answer too.
 pub fn estimate_request(request: &CreateChatCompletionRequest) -> Usage {
     let messages = serde_json::to_value(&request.messages).map_or(0, |v| estimate_json_tokens(&v));
-    let tools = request
-        .tools
-        .as_ref()
-        .and_then(|t| serde_json::to_value(t).ok())
-        .map_or(0, |v| estimate_json_tokens(&v));
+    let tools =
+        request.tools.as_ref().and_then(|t| serde_json::to_value(t).ok()).map_or(0, |v| estimate_json_tokens(&v));
     // a few tokens of framing per message
     let framing = 4 * request.messages.len() as u64;
     #[allow(deprecated)]
@@ -72,7 +69,10 @@ pub fn estimate_request(request: &CreateChatCompletionRequest) -> Usage {
 /// # Errors
 /// [`BudgetError::UnknownModel`] if the model has no price, otherwise the
 /// errors of [`AgentBudget::reserve`] (exhausted, killed).
-pub fn reserve_request(budget: &AgentBudget, request: &CreateChatCompletionRequest) -> Result<Reservation, BudgetError> {
+pub fn reserve_request(
+    budget: &AgentBudget,
+    request: &CreateChatCompletionRequest,
+) -> Result<Reservation, BudgetError> {
     budget.reserve_for(&request.model, &estimate_request(request))
 }
 
@@ -93,7 +93,10 @@ pub fn settle_response(reservation: Reservation, response: &CreateChatCompletion
 /// [`BudgetError::InvalidConfig`] if the response has no `usage`, and
 /// [`BudgetError::UnknownModel`] if its model has no price. Nothing is booked
 /// on error.
-pub fn record_response(budget: &AgentBudget, response: &CreateChatCompletionResponse) -> Result<ChargeOutcome, BudgetError> {
+pub fn record_response(
+    budget: &AgentBudget,
+    response: &CreateChatCompletionResponse,
+) -> Result<ChargeOutcome, BudgetError> {
     let usage = response
         .usage
         .as_ref()
@@ -217,7 +220,8 @@ mod tests {
     #[test]
     fn reserve_then_settle_books_reported_usage() {
         let budget = AgentBudget::builder("a", 1.0).build().unwrap();
-        let r = request(r#"{"model":"gpt-4o","max_completion_tokens":1000,"messages":[{"role":"user","content":"hi"}]}"#);
+        let r =
+            request(r#"{"model":"gpt-4o","max_completion_tokens":1000,"messages":[{"role":"user","content":"hi"}]}"#);
         let hold = reserve_request(&budget, &r).unwrap();
         assert!(budget.reserved_usd() > 0.0);
         let resp: CreateChatCompletionResponse = serde_json::from_str(
@@ -230,9 +234,8 @@ mod tests {
         // the echoed id has no price, so the reserved model (gpt-4o) prices it
         // (a dated snapshot such as gpt-4o-2099-01-01 now resolves through
         // llm-prices 1.3 and is priced as itself)
-        let expected = PriceTable::builtin()
-            .cost_usage("gpt-4o", &Usage::new(2006, 300).with_cache_read(1920))
-            .unwrap();
+        let expected =
+            PriceTable::builtin().cost_usage("gpt-4o", &Usage::new(2006, 300).with_cache_read(1920)).unwrap();
         assert!((out.recorded_usd - expected).abs() < 1e-9);
         assert_eq!(budget.reserved_usd(), 0.0);
         let log = budget.drain_audit_log();
@@ -247,7 +250,8 @@ mod tests {
         let hold = reserve_request(&budget, &r).unwrap();
         let held = hold.estimate_usd();
         let resp: CreateChatCompletionResponse =
-            serde_json::from_str(r#"{"id":"x","object":"chat.completion","created":1,"model":"gpt-4o","choices":[]}"#).unwrap();
+            serde_json::from_str(r#"{"id":"x","object":"chat.completion","created":1,"model":"gpt-4o","choices":[]}"#)
+                .unwrap();
         assert!(record_response(&budget, &resp).is_err());
         let out = settle_response(hold, &resp);
         assert!((out.recorded_usd - held).abs() < 1e-12);

@@ -58,7 +58,7 @@ async fn main() -> Result<(), BudgetError> {
 
     // The hook killed the researcher's scope only; the writer's slice is intact.
     let writer = AgentBuilder::new(MockCompletionModel::from_turns([
-        MockTurn::text("draft").with_usage(Usage::new().input_tokens(2_000).output_tokens(300)),
+        MockTurn::text("draft").with_usage(Usage::new().input_tokens(2_000).output_tokens(300))
     ]))
     .add_hook(BudgetHook::new(writing.budget().clone(), "gpt-4o").reserve_output_tokens(300))
     .build();

@@ -88,7 +88,8 @@ fn allow_holds_nothing_and_books_zero() {
 
 #[test]
 fn reserve_holds_and_books_the_flat_amount() {
-    let policy = UnpricedPolicy::new(PriceAction::Reserve(0.01), PriceAction::Reserve(0.02), PriceAction::Reserve(0.03));
+    let policy =
+        UnpricedPolicy::new(PriceAction::Reserve(0.01), PriceAction::Reserve(0.02), PriceAction::Reserve(0.03));
     let want = [0.0, 0.01, 0.02, 0.03];
     for ((table, model, status), flat) in cases().into_iter().zip(want) {
         let a = agent(table, Some(policy));

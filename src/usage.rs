@@ -110,9 +110,7 @@ impl Usage {
 
     /// Prompt tokens billed at the normal input price.
     pub fn fresh_input_tokens(&self) -> u64 {
-        self.input_tokens
-            .saturating_sub(self.cached_input_tokens)
-            .saturating_sub(self.cache_write_tokens)
+        self.input_tokens.saturating_sub(self.cached_input_tokens).saturating_sub(self.cache_write_tokens)
     }
 
     /// Parse a provider response body, or just its usage object, from JSON text.
@@ -121,8 +119,8 @@ impl Usage {
     /// [`BudgetError::InvalidConfig`] if the text is not JSON or has no
     /// recognisable usage block.
     pub fn from_json(text: &str) -> Result<Self, BudgetError> {
-        let v: Value = serde_json::from_str(text)
-            .map_err(|e| BudgetError::InvalidConfig(format!("usage JSON: {e}")))?;
+        let v: Value =
+            serde_json::from_str(text).map_err(|e| BudgetError::InvalidConfig(format!("usage JSON: {e}")))?;
         Self::from_value(&v)
     }
 
@@ -131,11 +129,7 @@ impl Usage {
     /// # Errors
     /// [`BudgetError::InvalidConfig`] if there is no recognisable usage block.
     pub fn from_value(v: &Value) -> Result<Self, BudgetError> {
-        let u = v
-            .get("usage")
-            .or_else(|| v.get("usageMetadata"))
-            .or_else(|| v.get("usage_metadata"))
-            .unwrap_or(v);
+        let u = v.get("usage").or_else(|| v.get("usageMetadata")).or_else(|| v.get("usage_metadata")).unwrap_or(v);
         // OpenAI Chat Completions
         if u.get("prompt_tokens").is_some() {
             let cached = u.get("prompt_tokens_details").map_or(0, |d| n(d, "cached_tokens"));
@@ -248,11 +242,7 @@ pub fn estimate_json_tokens(v: &Value) -> u64 {
 impl From<&async_openai::types::chat::CompletionUsage> for Usage {
     fn from(u: &async_openai::types::chat::CompletionUsage) -> Self {
         let input = u64::from(u.prompt_tokens);
-        let cached = u
-            .prompt_tokens_details
-            .as_ref()
-            .and_then(|d| d.cached_tokens)
-            .map_or(0, u64::from);
+        let cached = u.prompt_tokens_details.as_ref().and_then(|d| d.cached_tokens).map_or(0, u64::from);
         Self {
             input_tokens: input,
             cached_input_tokens: cached.min(input),
@@ -274,7 +264,10 @@ mod tests {
                 "prompt_tokens_details":{"cached_tokens":1920},"completion_tokens_details":{"reasoning_tokens":0}}}"#,
         )
         .unwrap();
-        assert_eq!(u, Usage { input_tokens: 2006, cached_input_tokens: 1920, cache_write_tokens: 0, output_tokens: 300 });
+        assert_eq!(
+            u,
+            Usage { input_tokens: 2006, cached_input_tokens: 1920, cache_write_tokens: 0, output_tokens: 300 }
+        );
         assert_eq!(u.fresh_input_tokens(), 86);
     }
 
@@ -317,7 +310,10 @@ mod tests {
         assert!(Usage::from_json("not json").is_err());
         assert!(Usage::from_json(r#"{"choices":[]}"#).is_err());
         // a cached count larger than the prompt is clamped
-        let u = Usage::from_json(r#"{"prompt_tokens":10,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":99}}"#).unwrap();
+        let u = Usage::from_json(
+            r#"{"prompt_tokens":10,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":99}}"#,
+        )
+        .unwrap();
         assert_eq!(u.fresh_input_tokens(), 0);
         let u = Usage::from_json(r#"{"prompt_tokens":-5,"completion_tokens":"x"}"#).unwrap();
         assert_eq!(u, Usage::default());
@@ -327,11 +323,17 @@ mod tests {
     fn priced_with_cache_discounts() {
         // claude-sonnet-4-5: $3 in, $15 out, $0.30 cache read, $3.75 cache write per million.
         let p = PriceTable::builtin().require("claude-sonnet-4-5").unwrap();
-        let u = Usage { input_tokens: 1_000_000 + 2_000_000 + 1_000_000, cached_input_tokens: 2_000_000, cache_write_tokens: 1_000_000, output_tokens: 1_000_000 };
+        let u = Usage {
+            input_tokens: 1_000_000 + 2_000_000 + 1_000_000,
+            cached_input_tokens: 2_000_000,
+            cache_write_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+        };
         let expected = 3.0 + 2.0 * 0.3 + 3.75 + 15.0;
-        assert!((p.cost_usage(&u) - expected).abs() < 1e-9, "{}", p.cost_usage(&u));
+        let got = p.cost_usage(&u).unwrap();
+        assert!((got - expected).abs() < 1e-9, "{got}");
         // without caching it is the plain price
-        assert!((p.cost_usage(&Usage::new(1_000, 1_000)) - p.cost(1_000, 1_000)).abs() < 1e-15);
+        assert!((p.cost_usage(&Usage::new(1_000, 1_000)).unwrap() - p.cost(1_000, 1_000)).abs() < 1e-15);
     }
 
     #[test]
@@ -339,7 +341,10 @@ mod tests {
         let a = Usage::from_parts(100, 2_000, 0, 50);
         let b = Usage::new(2_100, 50).with_cache_read(2_000);
         assert_eq!(a, b);
-        assert_eq!(a, Usage::from_json(r#"{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":2000}"#).unwrap());
+        assert_eq!(
+            a,
+            Usage::from_json(r#"{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":2000}"#).unwrap()
+        );
         let w = Usage::from_parts(10, 0, 30, 1);
         assert_eq!(w, Usage::new(40, 1).with_cache_write(30));
         assert_eq!(w.fresh_input_tokens(), 10);

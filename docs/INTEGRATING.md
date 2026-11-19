@@ -75,7 +75,13 @@ hold.settle_usage("gpt-4o", &usage);                                        // b
 ```
 
 - A refused reservation is `BudgetError::AgentExhausted` (or `KillSwitchActivated`,
-  `ScopeClosed`, `UnknownModel` / `Unpriced`). The call is never made.
+  `ScopeClosed`, `UnknownModel` / `Unpriced` / `CachePriceMissing` / `StalePrice`).
+  The call is never made.
+- Since 0.10 every call the budget cannot price exactly is refused: an unknown
+  model, cache tokens on a price with no cache rate, a price last checked more
+  than 90 days ago. The opt-outs (`allow_unpriced()`, `allow_stale_prices()`,
+  `unsafe_soft_limit()`) emit an `UnsafeEvent` on every call they let through;
+  send them to your logger with `on_unsafe(..)`. See the `safety` module.
 - Dropping a `Reservation` without settling releases the hold, so an error or
   a cancelled future books nothing.
 - `Usage::from_json` reads OpenAI (Chat Completions and Responses), Anthropic
@@ -126,7 +132,13 @@ release cadence:
 - `PriceTable::from_litellm_json(&json)` loads a newer LiteLLM file at startup.
 - `PriceTable::with_hook` plugs in your own lookup.
 - `AgentBudgetBuilder::unpriced_policy` decides what happens for a model
-  with no price: allow, reserve a fixed amount, or deny.
+  with no price: allow, reserve a fixed amount, or deny (the default).
+- Every built-in price carries the date it was checked; a budget refuses
+  prices older than `max_price_age_days` (default 90). `cargo update -p
+  llm-prices` keeps them fresh without a new llm-budget release.
+- `llm-budget audit calls.jsonl --cap 5` replays a log of calls and shows what
+  a soft limit (check before, book after, $0 for unknown models) would have
+  let past the cap. The library API is `llm_budget::audit`.
 
 ## Stability
 

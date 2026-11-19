@@ -70,11 +70,17 @@ impl FleetBudget {
     }
 
     /// The fleet total, in USD.
-    pub fn total_limit_usd(&self) -> f64 { nanos_to_usd(self.fleet_limit_nanos) }
+    pub fn total_limit_usd(&self) -> f64 {
+        nanos_to_usd(self.fleet_limit_nanos)
+    }
     /// Sum of all agent caps handed out, in USD.
-    pub fn allocated_usd(&self) -> f64 { nanos_to_usd(self.allocated_nanos.load(Ordering::SeqCst)) }
+    pub fn allocated_usd(&self) -> f64 {
+        nanos_to_usd(self.allocated_nanos.load(Ordering::SeqCst))
+    }
     /// Sum of what all agents actually spent, in USD.
-    pub fn spent_usd(&self) -> f64 { nanos_to_usd(self.spent_nanos.load(Ordering::SeqCst)) }
+    pub fn spent_usd(&self) -> f64 {
+        nanos_to_usd(self.spent_nanos.load(Ordering::SeqCst))
+    }
     /// Not yet handed out to any agent, in USD.
     pub fn available_usd(&self) -> f64 {
         let alloc = self.allocated_nanos.load(Ordering::SeqCst);
@@ -145,9 +151,7 @@ impl FleetAllocator {
             .build()?;
         let mut agents = self.write();
         if agents.contains_key(agent_id) {
-            return Err(BudgetError::InvalidConfig(format!(
-                "agent '{agent_id}' is already registered"
-            )));
+            return Err(BudgetError::InvalidConfig(format!("agent '{agent_id}' is already registered")));
         }
         self.fleet.allocate(agent_id, limit_usd)?;
         agents.insert(agent_id.to_string(), Arc::new(budget));
@@ -159,10 +163,7 @@ impl FleetAllocator {
     /// # Errors
     /// [`BudgetError::UnknownAgent`] if no such agent is registered.
     pub fn remove_agent(&self, agent_id: &str) -> Result<RemovedAgent, BudgetError> {
-        let agent = self
-            .write()
-            .remove(agent_id)
-            .ok_or_else(|| BudgetError::UnknownAgent(agent_id.to_string()))?;
+        let agent = self.write().remove(agent_id).ok_or_else(|| BudgetError::UnknownAgent(agent_id.to_string()))?;
         // The agent's spent money stays counted against the fleet allocation;
         // only the unspent part is released.
         let remaining = agent.remaining_usd();
@@ -186,10 +187,7 @@ impl FleetAllocator {
     }
 
     fn agent(&self, agent_id: &str) -> Result<Arc<AgentBudget>, BudgetError> {
-        self.read()
-            .get(agent_id)
-            .cloned()
-            .ok_or_else(|| BudgetError::UnknownAgent(agent_id.to_string()))
+        self.read().get(agent_id).cloned().ok_or_else(|| BudgetError::UnknownAgent(agent_id.to_string()))
     }
 
     /// Charge an agent by ID, priced by its current tier. Returns
@@ -284,12 +282,7 @@ impl FleetAllocator {
     /// [`BudgetError::UnknownAgent`] if either agent is missing,
     /// [`BudgetError::InvalidConfig`] for a non-positive amount or the same agent twice,
     /// [`BudgetError::ReallocationFailed`] if the source has less than `amount_usd` left.
-    pub async fn reallocate(
-        &self,
-        from_agent: &str,
-        to_agent: &str,
-        amount_usd: f64,
-    ) -> Result<(), BudgetError> {
+    pub async fn reallocate(&self, from_agent: &str, to_agent: &str, amount_usd: f64) -> Result<(), BudgetError> {
         if !amount_usd.is_finite() || amount_usd <= 0.0 {
             return Err(BudgetError::InvalidConfig("reallocation amount must be positive".into()));
         }
@@ -493,10 +486,7 @@ mod tests {
         assert!((snaps["a2"].limit_usd - 25.0).abs() < 1e-9);
         assert!((fleet.fleet_budget().allocated_usd() - 40.0).abs() < 1e-9);
         // a1 now has only $15 to give.
-        assert!(matches!(
-            fleet.reallocate("a1", "a2", 16.0).await,
-            Err(BudgetError::ReallocationFailed { .. })
-        ));
+        assert!(matches!(fleet.reallocate("a1", "a2", 16.0).await, Err(BudgetError::ReallocationFailed { .. })));
         assert!(fleet.reallocate("a1", "a1", 1.0).await.is_err());
         assert!(fleet.reallocate("a1", "a2", -1.0).await.is_err());
     }

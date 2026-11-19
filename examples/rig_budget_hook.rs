@@ -35,10 +35,7 @@ fn paid_turn(id: &str) -> MockTurn {
 async fn main() -> Result<(), BudgetError> {
     // $0.10 for the whole team, every booked turn kept in the audit log.
     let budget = Arc::new(
-        AgentBudget::builder("research-team", 0.10)
-            .tier(ModelTier::Standard)
-            .audit_log(AuditLog::Unbounded)
-            .build()?,
+        AgentBudget::builder("research-team", 0.10).tier(ModelTier::Standard).audit_log(AuditLog::Unbounded).build()?,
     );
 
     // Agent 1 wants five paid turns, but the budget covers three and a bit.
@@ -58,12 +55,7 @@ async fn main() -> Result<(), BudgetError> {
         Ok(answer) => println!("researcher finished: {answer:?}"),
         Err(e) => println!("researcher stopped: {e}"),
     }
-    println!(
-        "spent ${:.4} of ${:.2} (killed: {})",
-        budget.spent_usd(),
-        budget.limit_usd(),
-        budget.is_killed()
-    );
+    println!("spent ${:.4} of ${:.2} (killed: {})", budget.spent_usd(), budget.limit_usd(), budget.is_killed());
 
     // Agent 2 shares the budget. It is stopped before its first call, so
     // it never costs anything.

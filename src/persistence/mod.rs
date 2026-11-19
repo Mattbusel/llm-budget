@@ -2,10 +2,10 @@
 
 use crate::budget::BudgetSnapshot;
 use crate::error::BudgetError;
-use std::path::PathBuf;
-use tokio::sync::RwLock;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 /// Serializable budget state for a session.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -28,10 +28,7 @@ pub struct BudgetStore {
 impl BudgetStore {
     /// Store files under `base_path` (created on first save).
     pub fn new(base_path: impl Into<PathBuf>) -> Self {
-        Self {
-            base_path: base_path.into(),
-            cache: Arc::new(RwLock::new(HashMap::new())),
-        }
+        Self { base_path: base_path.into(), cache: Arc::new(RwLock::new(HashMap::new())) }
     }
 
     /// Save budget snapshots for a session.
@@ -41,31 +38,19 @@ impl BudgetStore {
     ///
     /// # Errors
     /// [`BudgetError::PersistenceError`] for an invalid id or an I/O failure.
-    pub async fn save(
-        &self,
-        session_id: &str,
-        snapshots: Vec<BudgetSnapshot>,
-    ) -> Result<(), BudgetError> {
+    pub async fn save(&self, session_id: &str, snapshots: Vec<BudgetSnapshot>) -> Result<(), BudgetError> {
         let path = self.session_path(session_id)?;
-        let state = PersistedBudgetState {
-            session_id: session_id.to_string(),
-            snapshots,
-            saved_at_ms: now_ms(),
-        };
+        let state = PersistedBudgetState { session_id: session_id.to_string(), snapshots, saved_at_ms: now_ms() };
 
         if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await
-                .map_err(|e| BudgetError::PersistenceError(e.to_string()))?;
+            tokio::fs::create_dir_all(parent).await.map_err(|e| BudgetError::PersistenceError(e.to_string()))?;
         }
-        let json = serde_json::to_string_pretty(&state)
-            .map_err(|e| BudgetError::PersistenceError(e.to_string()))?;
+        let json = serde_json::to_string_pretty(&state).map_err(|e| BudgetError::PersistenceError(e.to_string()))?;
         // Write to a temporary file and rename it, so a crash mid-write never
         // leaves a truncated JSON file behind.
         let tmp = path.with_extension("json.tmp");
-        tokio::fs::write(&tmp, json).await
-            .map_err(|e| BudgetError::PersistenceError(e.to_string()))?;
-        tokio::fs::rename(&tmp, &path).await
-            .map_err(|e| BudgetError::PersistenceError(e.to_string()))?;
+        tokio::fs::write(&tmp, json).await.map_err(|e| BudgetError::PersistenceError(e.to_string()))?;
+        tokio::fs::rename(&tmp, &path).await.map_err(|e| BudgetError::PersistenceError(e.to_string()))?;
 
         self.cache.write().await.insert(session_id.to_string(), state);
         Ok(())
@@ -82,12 +67,11 @@ impl BudgetStore {
             return Ok(state.clone());
         }
 
-        let data = tokio::fs::read_to_string(&path).await
-            .map_err(|_| BudgetError::PersistenceError(
-                format!("session '{}' not found on disk", session_id)
-            ))?;
-        let state: PersistedBudgetState = serde_json::from_str(&data)
-            .map_err(|e| BudgetError::PersistenceError(e.to_string()))?;
+        let data = tokio::fs::read_to_string(&path)
+            .await
+            .map_err(|_| BudgetError::PersistenceError(format!("session '{}' not found on disk", session_id)))?;
+        let state: PersistedBudgetState =
+            serde_json::from_str(&data).map_err(|e| BudgetError::PersistenceError(e.to_string()))?;
 
         self.cache.write().await.insert(session_id.to_string(), state.clone());
         Ok(state)
@@ -113,11 +97,9 @@ impl BudgetStore {
     /// [`BudgetError::PersistenceError`] if the directory cannot be read.
     pub async fn list_sessions(&self) -> Result<Vec<String>, BudgetError> {
         let mut sessions = Vec::new();
-        let mut dir = tokio::fs::read_dir(&self.base_path).await
-            .map_err(|e| BudgetError::PersistenceError(e.to_string()))?;
-        while let Some(entry) = dir.next_entry().await
-            .map_err(|e| BudgetError::PersistenceError(e.to_string()))?
-        {
+        let mut dir =
+            tokio::fs::read_dir(&self.base_path).await.map_err(|e| BudgetError::PersistenceError(e.to_string()))?;
+        while let Some(entry) = dir.next_entry().await.map_err(|e| BudgetError::PersistenceError(e.to_string()))? {
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
             if name_str.ends_with(".budget.json") {
@@ -132,9 +114,7 @@ impl BudgetStore {
         let valid = !session_id.is_empty()
             && session_id.len() <= 200
             && !session_id.starts_with('.')
-            && session_id
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+            && session_id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
         if !valid {
             return Err(BudgetError::PersistenceError(format!(
                 "invalid session id '{session_id}': use letters, digits, '-', '_' or '.'"
@@ -145,10 +125,7 @@ impl BudgetStore {
 }
 
 fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -226,11 +203,8 @@ mod tests {
     async fn test_budget_store_multiple_snapshots_per_session() {
         let dir = TempDir::new().expect("tempdir");
         let store = BudgetStore::new(dir.path());
-        let snapshots = vec![
-            make_snapshot("a1", 1.0, 10.0),
-            make_snapshot("a2", 3.0, 10.0),
-            make_snapshot("a3", 0.5, 10.0),
-        ];
+        let snapshots =
+            vec![make_snapshot("a1", 1.0, 10.0), make_snapshot("a2", 3.0, 10.0), make_snapshot("a3", 0.5, 10.0)];
         store.save("fleet-session", snapshots).await.expect("save");
         let loaded = store.load("fleet-session").await.expect("load");
         assert_eq!(loaded.snapshots.len(), 3);

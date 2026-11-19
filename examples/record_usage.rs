@@ -16,9 +16,7 @@ fn fake_call(turn: u64) -> (u64, u64, u64, u64) {
 
 fn main() -> Result<(), BudgetError> {
     // Your own price for a self-hosted model, on top of the built-in table.
-    let prices = PriceTable::builtin()
-        .clone()
-        .with_price(ModelPrice::new("in-house-70b", "self-hosted", 0.20, 0.60));
+    let prices = PriceTable::builtin().clone().with_price(ModelPrice::new("in-house-70b", "self-hosted", 0.20, 0.60));
     let agent = AgentBudget::builder("researcher", 0.25).price_table(prices).build()?;
 
     let model = "claude-sonnet-4-6";

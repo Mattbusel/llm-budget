@@ -1,9 +1,9 @@
 //! Extended test coverage: error variants, model cascade edge cases,
 //! atomic budget concurrency, fleet exhaustion, persistence edge cases.
 
-use llm_budget::budget::{AgentBudget, AtomicBudget, BudgetEnvelope, ScopeKind};
 #[cfg(feature = "store")]
 use llm_budget::budget::BudgetSnapshot;
+use llm_budget::budget::{AgentBudget, AtomicBudget, BudgetEnvelope, ScopeKind};
 use llm_budget::error::BudgetError;
 use llm_budget::fleet::FleetBudget;
 use llm_budget::model::{ModelCascade, ModelTier};
@@ -128,7 +128,9 @@ fn test_atomic_budget_concurrent_charges_total_correct() {
             bc.charge(1.0).ok();
         }));
     }
-    for h in handles { h.join().unwrap(); }
+    for h in handles {
+        h.join().unwrap();
+    }
     assert!((b.spent_usd() - 10.0).abs() < 1e-4);
 }
 
@@ -300,7 +302,7 @@ async fn test_budget_envelope_audit_log_grows() {
 async fn test_agent_budget_remaining_decreases_after_charge() {
     let agent = AgentBudget::new("a1", 10.0, ModelTier::Premium, 0.1).unwrap();
     let before = agent.remaining_usd();
-    agent.charge(10, 10, None, None).await.unwrap();
+    agent.charge_model("gpt-4o", 10, 10, None, None).await.unwrap();
     let after = agent.remaining_usd();
     assert!(after < before);
 }
@@ -308,7 +310,7 @@ async fn test_agent_budget_remaining_decreases_after_charge() {
 #[tokio::test]
 async fn test_agent_budget_snapshot_utilization_between_0_and_1() {
     let agent = AgentBudget::new("a1", 10.0, ModelTier::Standard, 0.1).unwrap();
-    agent.charge(100, 50, None, None).await.unwrap();
+    agent.charge_model("gpt-4o", 100, 50, None, None).await.unwrap();
     let snap = agent.snapshot().await;
     assert!(snap.utilization >= 0.0 && snap.utilization <= 1.0);
 }

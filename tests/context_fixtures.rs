@@ -105,7 +105,10 @@ fn delegation_round_trip_through_a2a_metadata() {
 
     let report = BudgetContext::reporting(&callee);
     let inc = report.incurred.as_ref().unwrap();
-    assert_eq!(report.to_json().unwrap()["incurred"]["cost"], json!({"amount": "0.07", "currency": "USD", "source": "local"}));
+    assert_eq!(
+        report.to_json().unwrap()["incurred"]["cost"],
+        json!({"amount": "0.07", "currency": "USD", "source": "local"})
+    );
     assert_eq!(inc.aggregated_child_cost.as_ref().unwrap().amount, Amount(50_000_000));
     assert_eq!(inc.delegations, Some(1));
 

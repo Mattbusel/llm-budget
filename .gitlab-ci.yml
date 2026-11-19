@@ -16,7 +16,8 @@ stages: [test]
 test:
   stage: test
   script:
-    - rustup component add clippy
+    - rustup component add clippy rustfmt
+    - cargo fmt --all --check
     - cargo build --all-features
     - cargo test --all-features
     - cargo test --no-default-features

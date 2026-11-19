@@ -67,10 +67,7 @@ fn contenders() -> Vec<(&'static str, Arc<dyn Charger>)> {
         ("llm-budget 0.2 (CAS)", Arc::new(llm_budget::budget::AtomicBudget::new(big).unwrap())),
         ("llm-budget 0.1.1 (add+rollback)", Arc::new(Old(llm_budget_011::budget::AtomicBudget::new(big).unwrap()))),
         ("Mutex<u64>", Arc::new(Locked { spent: Mutex::new(0), limit: u64::MAX / 2 })),
-        (
-            "governor check_n",
-            Arc::new(Gov(RateLimiter::direct(Quota::per_second(NonZeroU32::new(u32::MAX).unwrap())))),
-        ),
+        ("governor check_n", Arc::new(Gov(RateLimiter::direct(Quota::per_second(NonZeroU32::new(u32::MAX).unwrap()))))),
     ]
 }
 

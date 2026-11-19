@@ -25,7 +25,11 @@ enum Op {
 
 fn op() -> impl Strategy<Value = Op> {
     prop_oneof![
-        (any::<usize>(), 1u32..60, any::<bool>()).prop_map(|(parent, cents, fraction)| Op::Child { parent, cents, fraction }),
+        (any::<usize>(), 1u32..60, any::<bool>()).prop_map(|(parent, cents, fraction)| Op::Child {
+            parent,
+            cents,
+            fraction
+        }),
         (any::<usize>(), 0u32..30).prop_map(|(on, cents)| Op::Reserve { on, cents }),
         (any::<usize>(), 0u32..130).prop_map(|(hold, pct)| Op::Settle { hold, pct }),
         any::<usize>().prop_map(|hold| Op::Release { hold }),

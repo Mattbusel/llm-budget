@@ -7,11 +7,7 @@ use llm_budget::model::{ModelCascade, ModelTier};
 
 fn bench_atomic_budget_charge(c: &mut Criterion) {
     let budget = AtomicBudget::new(1000.0).unwrap();
-    c.bench_function("atomic_budget_charge", |b| {
-        b.iter(|| {
-            black_box(budget.charge(0.000001).unwrap())
-        })
-    });
+    c.bench_function("atomic_budget_charge", |b| b.iter(|| black_box(budget.charge(0.000001).unwrap())));
 }
 
 fn bench_fleet_budget_allocate(c: &mut Criterion) {
@@ -26,11 +22,7 @@ fn bench_fleet_budget_allocate(c: &mut Criterion) {
 fn bench_fleet_budget_available(c: &mut Criterion) {
     let fleet = FleetBudget::new(100.0).unwrap();
     fleet.allocate("a1", 10.0).unwrap();
-    c.bench_function("fleet_budget_available_usd", |b| {
-        b.iter(|| {
-            black_box(fleet.available_usd())
-        })
-    });
+    c.bench_function("fleet_budget_available_usd", |b| b.iter(|| black_box(fleet.available_usd())));
 }
 
 fn bench_model_cascade_evaluate(c: &mut Criterion) {

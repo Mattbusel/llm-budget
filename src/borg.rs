@@ -179,9 +179,7 @@ impl BorgPricing {
     fn build(table: Table, reference: String) -> Result<Self, BudgetError> {
         let probe = table.get().cost_usage(&reference, &Usage::new(1_000_000, 1_000_000))?;
         if !(probe.is_finite() && probe > 0.0) {
-            return Err(BudgetError::InvalidConfig(format!(
-                "reference model {reference} has no positive price"
-            )));
+            return Err(BudgetError::InvalidConfig(format!("reference model {reference} has no positive price")));
         }
         Ok(Self {
             table,
