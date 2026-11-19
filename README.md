@@ -1,13 +1,11 @@
-# llm-budget
+# llm-budget: AI agents have loop limits, not spending limits
 
 [![crates.io](https://img.shields.io/crates/v/llm-budget.svg)](https://crates.io/crates/llm-budget)
 [![docs.rs](https://img.shields.io/docsrs/llm-budget)](https://docs.rs/llm-budget)
 [![CI](https://github.com/Mattbusel/llm-budget/actions/workflows/ci.yml/badge.svg)](https://github.com/Mattbusel/llm-budget/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/Mattbusel/llm-budget/blob/main/LICENSE)
 
-Hard dollar caps for AI agents in Rust.
-
-Prices for 232 models built in.
+Almost no agent framework ships a hard dollar cap. They cap loops and iterations, and their guardrails cover prompt injection, PII and toxicity, not money ([AutoAgents #320](https://github.com/liquidos-ai/AutoAgents/pull/320), [langchain-rust #405](https://github.com/Abraxas-365/langchain-rust/pull/405)). Where a cap exists it trusts a price table: in a 9.3K-star framework every newer model fell back to a $1/$3 default, so the budget saw less than a fifth of what a gpt-5.5 call really cost ([PraisonAI #6433](https://github.com/MervinPraison/PraisonAI/pull/6433)). llm-budget prices 232 models, reserves the worst case in dollars before each call, and refuses the call that would not fit.
 
 - Refuses a call that would go over the cap.
 - Caps a whole fleet of agents.
